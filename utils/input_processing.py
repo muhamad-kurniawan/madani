@@ -195,7 +195,7 @@ class DataHandler:
         self.inference = inference
 
         # Build a dataset
-        self.dataset = EDMCustomDataset(X, y, formula)
+        self.dataset = MaterialDataset(X, y, formula)
 
         self.batch_size = batch_size
         self.shuffle = shuffle
