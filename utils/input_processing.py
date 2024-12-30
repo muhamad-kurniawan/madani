@@ -4,16 +4,16 @@ import torch
 from torch.utils.data import Dataset, DataLoader, random_split
 from collections import OrderedDict, Counter
 from tqdm import tqdm
+import re
 
 data_type_np = np.float32
 data_type_torch = torch.float32
 
 def _element_composition(formula):
 
-    from collections import 
     # e.g. "NaCl" -> {"Na": 1, "Cl": 1}
     # e.g. "SiO2" -> {"Si": 1, "O": 2}
-    import re
+    
     pattern = r'([A-Z][a-z]?)(\d*)'
     tokens = re.findall(pattern, formula)
     comp = Counter()
