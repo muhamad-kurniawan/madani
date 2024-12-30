@@ -50,17 +50,17 @@ def parse_csv(data,
     else:
         df = data
 
-    if 'formula' not in df.columns:
-        df['formula'] = df['cif_id'].str.split('_ICSD').str[0]
+    # if 'formula' not in df.columns:
+    #     df['formula'] = df['cif_id'].str.split('_ICSD').str[0]
 
     df['count'] = [len(_element_composition(form)) for form in df['formula']]
     # Optionally drop unary (single-element) compounds
     if drop_unary:
         df = df[df['count'] != 1]
 
-    # If not inference, group duplicates by formula and average them
-    if not inference:
-        df = df.groupby('formula').mean().reset_index()
+    # # If not inference, group duplicates by formula and average them
+    # if not inference:
+    #     df = df.groupby('formula').mean().reset_index()
 
     list_ohm = [OrderedDict(_element_composition(form)) for form in df['formula']]
 
