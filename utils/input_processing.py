@@ -31,34 +31,7 @@ def parse_csv(data,
                   scale=True,
                   inference=False,
                   verbose=True):
-    """
-    Reads a CSV file or DataFrame, creates the element features
-    and returns (X, y, formula).
-
-    Parameters
-    ----------
-    data : csv_path_or_df, str or pd.DataFrame
-        If str, path to CSV file; otherwise expects a DataFrame.
-    n_elements : int, optional
-        Number of elements to retain in representation (truncate or pad).
-    drop_unary : bool, optional
-        Whether to discard compounds containing only one element.
-    scale : bool, optional
-        If True, normalizes each row's composition so that sum of fractions = 1.
-    inference : bool, optional
-        If True, bypass certain steps like averaging duplicates.
-    verbose : bool, optional
-        Whether to display progress bars and print info.
-
-    Returns
-    -------
-    X : np.ndarray, shape = [N, n_elements, 2]
-        EDM data (elem_num and elem_frac).
-    y : np.ndarray, shape = [N]
-        Target values.
-    formula : np.ndarray, shape = [N]
-        Array of formula strings.
-    """
+   
     all_symbols = ['H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne', 'Na',
                    'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'Ar', 'K', 'Ca', 'Sc',
                    'Ti', 'V', 'Cr', 'Mn', 'Fe', 'Co', 'Ni', 'Cu', 'Zn', 'Ga',
@@ -80,7 +53,6 @@ def parse_csv(data,
     if 'formula' not in df.columns:
         df['formula'] = df['cif_id'].str.split('_ICSD').str[0]
 
-    # Count how many distinct elements each formula has
     df['count'] = [len(_element_composition(form)) for form in df['formula']]
     # Optionally drop unary (single-element) compounds
     if drop_unary:
@@ -90,14 +62,11 @@ def parse_csv(data,
     if not inference:
         df = df.groupby('formula').mean().reset_index()
 
-    # Build a list of OrderedDicts (element -> amount) for each formula
     list_ohm = [OrderedDict(_element_composition(form)) for form in df['formula']]
 
     y = df['target'].values.astype(data_type_np)
     formula = df['formula'].values
 
-    # Initialize EDM arrays
-    # We'll store element "numbers" (indexes) and "fractions"
     N = len(list_ohm)
     edm_array = np.zeros((N, n_elements, len(all_symbols) + 1), dtype=data_type_np)
     elem_num = np.zeros((N, n_elements), dtype=data_type_np)
@@ -118,7 +87,6 @@ def parse_csv(data,
                 # If the element isn't in all_symbols, skip
                 pass
 
-    # Optionally scale the fractions so the sum of each row = 1
     for i in range(N):
         # sum across the 'symbol' dimension
         raw_counts = edm_array[i, :, :].sum(axis=-1)
@@ -129,8 +97,6 @@ def parse_csv(data,
         else:
             elem_frac[i, :] = raw_counts
 
-    # Reshape and combine
-    # We keep the element "number" in one channel, fraction in the other
     elem_num = elem_num.reshape(N, n_elements, 1)
     elem_frac = elem_frac.reshape(N, n_elements, 1)
     X = np.concatenate((elem_num, elem_frac), axis=-1)  # shape [N, n_elements, 2]
