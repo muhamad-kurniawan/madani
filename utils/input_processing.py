@@ -25,7 +25,7 @@ def _element_composition(formula):
     return dict(comp)
 
 
-def parse_csv(csv_path_or_df,
+def parse_csv(data,
                   n_elements=6,
                   drop_unary=True,
                   scale=True,
@@ -37,7 +37,7 @@ def parse_csv(csv_path_or_df,
 
     Parameters
     ----------
-    csv_path_or_df : str or pd.DataFrame
+    data : csv_path_or_df, str or pd.DataFrame
         If str, path to CSV file; otherwise expects a DataFrame.
     n_elements : int, optional
         Number of elements to retain in representation (truncate or pad).
@@ -73,9 +73,9 @@ def parse_csv(csv_path_or_df,
                    'Cn', 'Nh', 'Fl', 'Mc', 'Lv', 'Ts', 'Og']
 
     if isinstance(csv_path_or_df, str):
-        df = pd.read_csv(csv_path_or_df, keep_default_na=False, na_values=[''])
+        df = pd.read_csv(data, keep_default_na=False, na_values=[''])
     else:
-        df = csv_path_or_df
+        df = data
 
     if 'formula' not in df.columns:
         df['formula'] = df['cif_id'].str.split('_ICSD').str[0]
