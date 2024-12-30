@@ -45,7 +45,7 @@ def parse_csv(data,
                    'No', 'Lr', 'Rf', 'Db', 'Sg', 'Bh', 'Hs', 'Mt', 'Ds', 'Rg',
                    'Cn', 'Nh', 'Fl', 'Mc', 'Lv', 'Ts', 'Og']
 
-    if isinstance(csv_path_or_df, str):
+    if isinstance(data, str):
         df = pd.read_csv(data, keep_default_na=False, na_values=[''])
     else:
         df = data
