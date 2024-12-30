@@ -58,7 +58,7 @@ def parse_csv(csv_path_or_df,
         Target values.
     formula : np.ndarray, shape = [N]
         Array of formula strings.
-
+    """
     all_symbols = ['H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne', 'Na',
                    'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'Ar', 'K', 'Ca', 'Sc',
                    'Ti', 'V', 'Cr', 'Mn', 'Fe', 'Co', 'Ni', 'Cu', 'Zn', 'Ga',
