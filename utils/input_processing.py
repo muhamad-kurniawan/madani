@@ -145,10 +145,6 @@ class MaterialDataset(Dataset):
 
 
 class DataHandler:
-    """
-    Handles reading data via parse_edm_csv, splitting into train/val sets,
-    and returning DataLoader objects for training, validation, or inference.
-    """
 
     def __init__(self,
                  csv_file,
@@ -190,7 +186,7 @@ class DataHandler:
         """
 
         # Parse the data
-        X, y, formula = parse_edm_csv(csv_file,
+        X, y, formula = parse_csv(csv_file,
                                       n_elements=n_elements,
                                       drop_unary=drop_unary,
                                       scale=scale,
