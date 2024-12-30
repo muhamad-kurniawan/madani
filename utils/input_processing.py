@@ -24,6 +24,23 @@ def _element_composition(formula):
             comp[elem] += int(num)
     return dict(comp)
 
+def parse_formula(formula):
+    # Expand the formula to handle brackets
+    while re.search(r'\(([^)]+)\)(\d*\.?\d*)', formula):
+        formula = re.sub(r'\(([^)]+)\)(\d*\.?\d*)',
+                         lambda m: ''.join([f"{el}{float(m.group(2) if m.group(2) else 1) * float(count if count else 1)}"
+                                             for el, count in re.findall(r'([A-Z][a-z]*)(\d*\.?\d*)', m.group(1))]),
+                         formula)
+    elements = re.findall(r'([A-Z][a-z]*)(\d*\.?\d*)', formula)
+    parsed = {}
+    for (element, fraction) in elements:
+        fraction = float(fraction) if fraction and fraction != '' else 1.0
+        if element in parsed:
+            parsed[element] += fraction
+        else:
+            parsed[element] = fraction
+    return parsed
+
 
 def parse_csv(data,
                   n_elements=6,
@@ -53,7 +70,7 @@ def parse_csv(data,
     # if 'formula' not in df.columns:
     #     df['formula'] = df['cif_id'].str.split('_ICSD').str[0]
 
-    df['count'] = [len(_element_composition(form)) for form in df['formula']]
+    df['count'] = [len(parse_formula(form)) for form in df['formula']]
     # Optionally drop unary (single-element) compounds
     if drop_unary:
         df = df[df['count'] != 1]
@@ -62,7 +79,7 @@ def parse_csv(data,
     # if not inference:
     #     df = df.groupby('formula').mean().reset_index()
 
-    list_ohm = [OrderedDict(_element_composition(form)) for form in df['formula']]
+    list_ohm = [OrderedDict(parse_formula(form)) for form in df['formula']]
 
     y = df['target'].values.astype(data_type_np)
     formula = df['formula'].values
