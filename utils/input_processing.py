@@ -149,7 +149,7 @@ class DataHandler:
     def __init__(self,
                  csv_file,
                  n_elements=6,
-                 drop_unary=True,
+                 drop_unary=False,
                  scale=True,
                  inference=False,
                  verbose=True,
