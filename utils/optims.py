@@ -522,7 +522,3 @@ def RobustL2(output, log_std, target):
     squared = torch.pow(output - target, 2.0)
     loss = 0.5 * squared * torch.exp(-2.0 * log_std) + log_std
     return torch.mean(loss)
-
-
-def count_parameters(model):
-    return sum(p.numel() for p in model.parameters()if p.requires_grad)
