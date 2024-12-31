@@ -11,7 +11,7 @@ from madani.utils.scaling import Scaler, DummyScaler
 from madani.utils.optims import RobustL1, BCEWithLogitsLoss
 from madani.utils.optims import Lamb, Lookahead, SWA
 from madani.utils.utils import count_parameters, get_compute_device
-from madani.utils.input_processing import DataLoader, data_type_torch
+from madani.utils.input_processing import DataHandler, data_type_torch
 
 
 class ModelTrainer:
@@ -61,7 +61,7 @@ class ModelTrainer:
 
         self.batch_size = batch_size
         inference = not train
-        data_loaders = EDM_CsvLoader(csv_data=file_name,
+        data_loaders = DataHandler(csv_data=file_name,
                                      batch_size=batch_size,
                                      n_elements=self.n_elements,
                                      inference=inference,
