@@ -7,8 +7,6 @@ import matplotlib.pyplot as plt
 from torch.optim.lr_scheduler import CyclicLR
 from sklearn.metrics import mean_absolute_error, roc_auc_score
 
-# Dummy placeholders for custom classes or functions you might have:
-# (Replace these with your actual definitions or imports)
 from madani.utils.scaling import Scaler, DummyScaler
 from madani.utils.optims import RobustL1, BCEWithLogitsLoss
 from madani.utils.optims import Lamb, Lookahead, SWA
@@ -25,24 +23,6 @@ class ModelTrainer:
                  verbose=True,
                  drop_unary=True,
                  scale=True):
-        """
-        Parameters
-        ----------
-        model : torch.nn.Module
-            Your PyTorch model.
-        model_name : str, optional
-            A name for tracking/logging.
-        n_elements : int or 'infer', optional
-            Number of elements in the EDM representation.
-        capture_every : {None, 'step', 'epoch'}, optional
-            If set, captures attention tensors for debugging or analysis.
-        verbose : bool, optional
-            Print summary info about the model.
-        drop_unary : bool, optional
-            Whether to drop single-element compounds from the dataset.
-        scale : bool, optional
-            Whether to scale target values (via Scaler or DummyScaler).
-        """
 
         self.model = model
         self.model_name = model_name
@@ -78,18 +58,7 @@ class ModelTrainer:
             print(f'Capturing attention tensors every {self.capture_every}')
 
     def load_data(self, file_name, batch_size=2**9, train=False):
-        """
-        Loads data from a CSV or DataFrame, builds EDM, and wraps in a DataLoader.
-        Parameters
-        ----------
-        file_name : str or pd.DataFrame
-            The path to your CSV file or an already-loaded DataFrame.
-        batch_size : int
-            How many samples per batch to load.
-        train : bool
-            If True, treat this as a training set (which triggers scaling and
-            sets self.train_loader). If False, treat as inference/validation.
-        """
+
         self.batch_size = batch_size
         inference = not train
         data_loaders = EDM_CsvLoader(csv_data=file_name,
@@ -120,19 +89,7 @@ class ModelTrainer:
         self.data_loader = data_loader
 
     def fit(self, epochs=None, checkin=None, losscurve=False):
-        """
-        Train the model (formerly done in `train()`) and evaluate periodically
-        on self.data_loader. Uses SWA and cyclical learning rate if desired.
-
-        Parameters
-        ----------
-        epochs : int, optional
-            Number of training epochs.
-        checkin : int, optional
-            Frequency in epochs to run validation (and possibly plot).
-        losscurve : bool, optional
-            If True, show a matplotlib plot of training/validation curves.
-        """
+    
         # Safety checks
         assert self.train_loader is not None, "Please load training data."
         assert self.data_loader is not None, "Please load validation data."
@@ -196,7 +153,7 @@ class ModelTrainer:
 
         minima = []  # track whether we found "minimum" improvements
 
-        # ---- MAIN TRAINING LOOP ----
+        # ---- TRAINING ----
         for epoch in range(epochs):
             self.epoch = epoch
             self.epochs = epochs
@@ -205,13 +162,11 @@ class ModelTrainer:
             self.model.train()
             ti = time()
 
-            # ---- The old `train()` method is inlined here ----
             for i, data in enumerate(self.train_loader):
                 X, y, formula = data
                 # Scale targets
                 y = self.scaler.scale(y)
 
-                # Split EDM into element indices (src) and fractions
                 src, frac = X.squeeze(-1).chunk(2, dim=1)
 
                 # Add random noise ("jitter") to fractions for robustness
@@ -260,7 +215,7 @@ class ModelTrainer:
                     self.optimizer.update_swa(mae_v)
                     minima.append(self.optimizer.minimum_found)
 
-            # (Optional) measure training speed
+            # measure training speed
             dt = time() - ti
             datalen = len(self.train_loader.dataset)
             # print(f'Training speed: {datalen/dt:0.3f} samples/sec')
@@ -420,8 +375,7 @@ class ModelTrainer:
 
     def save_network(self, model_name=None):
         """
-        Saves the model weights, scaler state, and name to a .pth file
-        in the 'models/trained_models' directory.
+        Saves the model weights and scaler state
         """
         if model_name is None:
             model_name = self.model_name
@@ -438,7 +392,7 @@ class ModelTrainer:
 
     def load_network(self, path):
         """
-        Loads model + scaler state from the .pth file in 'models/trained_models'.
+        Loads model + scaler state from the .pth file
         """
         path = f'models/trained_models/{path}'
         checkpoint = torch.load(path, map_location=self.compute_device)
