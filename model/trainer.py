@@ -61,7 +61,7 @@ class ModelTrainer:
 
         self.batch_size = batch_size
         inference = not train
-        data_loaders = DataHandler(csv_data=file_name,
+        data_loaders = DataHandler(file_name,
                                      batch_size=batch_size,
                                      n_elements=self.n_elements,
                                      inference=inference,
