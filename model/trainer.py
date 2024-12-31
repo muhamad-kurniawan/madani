@@ -18,7 +18,7 @@ class ModelTrainer:
     def __init__(self,
                  model,
                  model_name='UnnamedModel',
-                 n_elements='infer',
+                 n_elements=8,
                  capture_every=None,
                  verbose=True,
                  drop_unary=True,
