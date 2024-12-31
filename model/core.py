@@ -10,10 +10,10 @@ from sklearn.metrics import mean_absolute_error, roc_auc_score
 # Dummy placeholders for custom classes or functions you might have:
 # (Replace these with your actual definitions or imports)
 from madani.utils.scaling import Scaler, DummyScaler
-from madani.models.losses import RobustL1, BCEWithLogitsLoss
-from madani.models.optims import Lamb, Lookahead, SWA
-from madani.models.utils import count_parameters, get_compute_device
-from madani.dataloaders.edm_loader import EDM_CsvLoader, data_type_torch
+from madani.utils.optims import RobustL1, BCEWithLogitsLoss
+from madani.utils.optims import Lamb, Lookahead, SWA
+from madani.utils.utils import count_parameters, get_compute_device
+from madani.utils.input_processing import DataLoader, data_type_torch
 
 
 class ModelTrainer:
