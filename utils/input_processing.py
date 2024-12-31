@@ -213,7 +213,7 @@ class DataHandler:
 
         # Build a dataset
         self.dataset = MaterialDataset(X, y, formula)
-
+        self.n_elements = n_elements
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.pin_memory = pin_memory
