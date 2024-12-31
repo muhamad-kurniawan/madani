@@ -164,7 +164,7 @@ class MaterialDataset(Dataset):
 class DataHandler:
 
     def __init__(self,
-                 csv_file,
+                 data,
                  n_elements=6,
                  drop_unary=False,
                  scale=True,
@@ -203,7 +203,7 @@ class DataHandler:
         """
 
         # Parse the data
-        X, y, formula = parse_csv(csv_file,
+        X, y, formula = parse_csv(data,
                                       n_elements=n_elements,
                                       drop_unary=drop_unary,
                                       scale=scale,
