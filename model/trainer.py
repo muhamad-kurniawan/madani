@@ -75,7 +75,7 @@ class ModelTrainer:
         self.n_elements = data_loaders.n_elements
 
         # Grab the DataLoader
-        data_loader = data_loaders.get_data_loaders(inference=inference)
+        data_loader = data_loaders.get_data_loaders()
         y = data_loader.dataset.data[1]
 
         if train:
