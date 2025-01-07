@@ -221,42 +221,17 @@ class DataHandler:
         self.val_split = val_split
         self.data_len = len(self.dataset)
 
-    def get_data_loaders(self):
+    def get_data_loaders(self, inference=False):
         """
         Returns one or two DataLoader objects. If `inference=True`, returns only one.
         Otherwise, returns (train_loader, val_loader).
         """
-
-        if self.inference:
-            # For inference, just return the entire dataset in one DataLoader
-            loader = DataLoader(
-                self.dataset,
-                batch_size=self.batch_size,
-                shuffle=False,  # Usually don't shuffle inference data
-                pin_memory=self.pin_memory
-            )
-            return loader
-
-        # Otherwise, do a train/val split
-        val_size = int(self.val_split * self.data_len)
-        train_size = self.data_len - val_size
-
-        # Reproducible split
-        generator = torch.Generator().manual_seed(self.random_seed)
-        train_dataset, val_dataset = random_split(self.dataset,
-                                                 [train_size, val_size],
-                                                 generator=generator)
-        # Build loaders
-        train_loader = DataLoader(
-            train_dataset,
+        shuffle= not inference
+        # For inference, just return the entire dataset in one DataLoader
+        loader = DataLoader(
+            self.dataset,
             batch_size=self.batch_size,
-            shuffle=self.shuffle,
+            shuffle=shuffle,  # Usually don't shuffle inference data
             pin_memory=self.pin_memory
         )
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            pin_memory=self.pin_memory
-        )
-        return train_loader, val_loader
+        return loader
