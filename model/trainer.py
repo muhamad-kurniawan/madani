@@ -76,7 +76,7 @@ class ModelTrainer:
 
         # Grab the DataLoader
         data_loader = data_loaders.get_data_loaders(inference=inference)
-        y = data_loader.dataset.data[1]
+        y = data_loader.dataset.y
         if train:
             self.train_len = len(y)
             # Set up a scaler for regression or classification
