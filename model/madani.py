@@ -122,8 +122,9 @@ class FractionalEncoder(nn.Module):
             # x = 1 - x  # for sinusoidal encoding at x=0
         # clamp x[x < 1/self.resolution] = 1/self.resolution
         x = torch.clamp(x, min=1/self.resolution)
+        print(f'x {x}')
         frac_idx = torch.round(x * (self.resolution)).to(dtype=torch.long) - 1
-        print(f'frac_idx{frac_idx}')
+        print(f'frac_idx {frac_idx}')
         out = self.pe[frac_idx]
 
         return out
