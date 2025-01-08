@@ -115,6 +115,7 @@ class FractionalEncoder(nn.Module):
 
     def forward(self, x):
         x = x.clone()
+        print(f'x0 {x}')
         if self.log10:
             x = 0.0025 * (torch.log2(x))**2
             # clamp x[x > 1] = 1
