@@ -123,6 +123,7 @@ class FractionalEncoder(nn.Module):
         # clamp x[x < 1/self.resolution] = 1/self.resolution
         x = torch.clamp(x, min=1/self.resolution)
         frac_idx = torch.round(x * (self.resolution)).to(dtype=torch.long) - 1
+        print(f'frac_idx{frac_idx}')
         out = self.pe[frac_idx]
 
         return out
