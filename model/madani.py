@@ -447,7 +447,7 @@ class EncoderMoE(nn.Module):
 class Madani(nn.Module):
     def __init__(self,
                  out_dims=3,
-                 d_model=256,
+                 d_model=512,
                  N=3,
                  heads=4,
                  compute_device=None,
