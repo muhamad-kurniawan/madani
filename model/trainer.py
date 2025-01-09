@@ -166,7 +166,8 @@ class ModelTrainer:
                 # Scale targets
                 y = self.scaler.scale(y)
 
-                src, frac = X.squeeze(-1).chunk(2, dim=1)
+                # src, frac = X.squeeze(-1).chunk(2, dim=1)
+                src, frac = X.squeeze(-1).chunk(2, dim=2)
 
                 # Add random noise ("jitter") to fractions for robustness
                 frac = frac * (1 + (torch.randn_like(frac)) * self.fudge)
