@@ -158,7 +158,7 @@ class MaterialDataset(Dataset):
         if self.transform is not None:
             X_tensor, y_tensor = self.transform(X_tensor, y_tensor)
 
-        return X_tensor, y_tensor, formula_str
+        return (X_tensor, y_tensor, formula_str)
 
 
 class DataHandler:
