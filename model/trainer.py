@@ -166,8 +166,10 @@ class ModelTrainer:
                 # Scale targets
                 y = self.scaler.scale(y)
 
-                # src, frac = X.squeeze(-1).chunk(2, dim=1)
-                src, frac = X.squeeze(-1).chunk(2, dim=2)
+                print(f'X shape:{X.shape}')
+                src, frac = X.squeeze(-1).chunk(2, dim=1)
+                print(f'src shape:{src.shape}')
+                print(f'frac shape:{frac.shape}')
 
                 # Add random noise ("jitter") to fractions for robustness
                 frac = frac * (1 + (torch.randn_like(frac)) * self.fudge)
