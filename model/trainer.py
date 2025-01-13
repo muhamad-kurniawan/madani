@@ -369,6 +369,7 @@ class ModelTrainer:
                 # Slice location in the arrays
                 data_loc = slice(i*self.batch_size,
                                  i*self.batch_size + len(y))
+                print(f"src shape: {src.cpu().numpy().shape}, atoms slice shape: {atoms[data_loc, :].shape}")
 
                 atoms[data_loc, :] = src.cpu().numpy().astype('int32')
                 fractions[data_loc, :] = frac.cpu().numpy().astype('float32')
