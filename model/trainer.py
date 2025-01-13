@@ -167,7 +167,9 @@ class ModelTrainer:
                 y = self.scaler.scale(y)
 
                 print(f'X shape:{X.shape}')
-                src, frac = X.squeeze(-1).chunk(2, dim=1)
+                # src, frac = X.squeeze(-1).chunk(2, dim=1)
+                src = X[:, :, 0]
+                frac = X[:, :, 1]
                 print(f'src shape:{src.shape}')
                 print(f'frac shape:{frac.shape}')
 
