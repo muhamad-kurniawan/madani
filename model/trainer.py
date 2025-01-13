@@ -338,7 +338,9 @@ class ModelTrainer:
                         self.formula_current = formula.copy()
 
                 # Split EDM
-                src, frac = X.squeeze(-1).chunk(2, dim=1)
+                # src, frac = X.squeeze(-1).chunk(2, dim=1)
+                src = X[:, :, 0]
+                frac = X[:, :, 1]
                 src = src.to(self.compute_device,
                              dtype=torch.long,
                              non_blocking=True)
