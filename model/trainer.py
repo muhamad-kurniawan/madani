@@ -166,12 +166,12 @@ class ModelTrainer:
                 # Scale targets
                 y = self.scaler.scale(y)
 
-                print(f'X shape:{X.shape}')
+                # print(f'X shape:{X.shape}')
                 # src, frac = X.squeeze(-1).chunk(2, dim=1)
                 src = X[:, :, 0]
                 frac = X[:, :, 1]
-                print(f'src shape:{src.shape}')
-                print(f'frac shape:{frac.shape}')
+                # print(f'src shape:{src.shape}')
+                # print(f'frac shape:{frac.shape}')
 
                 # Add random noise ("jitter") to fractions for robustness
                 frac = frac * (1 + (torch.randn_like(frac)) * self.fudge)
@@ -371,7 +371,7 @@ class ModelTrainer:
                 # Slice location in the arrays
                 data_loc = slice(i*self.batch_size,
                                  i*self.batch_size + len(y))
-                print(f"src shape: {src.cpu().numpy().shape}, atoms slice shape: {atoms[data_loc, :].shape}")
+                # print(f"src shape: {src.cpu().numpy().shape}, atoms slice shape: {atoms[data_loc, :].shape}")
 
                 atoms[data_loc, :] = src.cpu().numpy().astype('int32')
                 fractions[data_loc, :] = frac.cpu().numpy().astype('float32')
