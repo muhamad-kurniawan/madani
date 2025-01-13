@@ -326,6 +326,7 @@ class ModelTrainer:
         self.model.eval()
         with torch.no_grad():
             for i, data in enumerate(loader):
+                print(f'loader predict {loader.dataset[0][0].shape}')
                 X, y, formula = data
 
                 # If capturing attention, store current formulas
