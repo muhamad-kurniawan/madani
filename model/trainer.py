@@ -310,7 +310,7 @@ class ModelTrainer:
         Runs inference on a given DataLoader. Returns:
         (act, pred, formulae, uncert).
         """
-        print(f'loader predict shape {loader.dataset[0].shape}')
+        # print(f'loader predict shape {loader.dataset[0].shape}')
         len_dataset = len(loader.dataset)
         # Each sample is [n_elements, 2]. E.g. if shape = [n_elements, 2].
         # n_atoms = int(len(loader.dataset[0][0]) / 2)
