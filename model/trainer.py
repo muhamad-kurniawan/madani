@@ -87,7 +87,7 @@ class ModelTrainer:
             self.train_loader = data_loader
         self.data_loader = data_loader
 
-    def fit(self, epochs=None, checkin=None, losscurve=False):
+    def fit(self, epochs=None, checkin=None, losscurve=False, discard_n=10):
     
         # Safety checks
         assert self.train_loader is not None, "Please load training data."
@@ -145,7 +145,7 @@ class ModelTrainer:
         self.lr_list = []
         self.xswa = []
         self.yswa = []
-        self.discard_n = 10
+        self.discard_n = discard_n
 
         # For early-stopping logic
         self.optimizer.discard_count = 0
