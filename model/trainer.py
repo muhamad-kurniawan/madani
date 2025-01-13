@@ -310,9 +310,11 @@ class ModelTrainer:
         Runs inference on a given DataLoader. Returns:
         (act, pred, formulae, uncert).
         """
+        print(f'loader predict shape {loader.dataset[0].shape}')
         len_dataset = len(loader.dataset)
         # Each sample is [n_elements, 2]. E.g. if shape = [n_elements, 2].
-        n_atoms = int(len(loader.dataset[0][0]) / 2)
+        # n_atoms = int(len(loader.dataset[0][0]) / 2)
+        n_atoms = int(len(loader.dataset[0][0]))
 
         act = np.zeros(len_dataset)
         pred = np.zeros(len_dataset)
@@ -326,7 +328,7 @@ class ModelTrainer:
         self.model.eval()
         with torch.no_grad():
             for i, data in enumerate(loader):
-                print(f'loader predict {loader.dataset[0][0].shape}')
+                
                 X, y, formula = data
 
                 # If capturing attention, store current formulas
