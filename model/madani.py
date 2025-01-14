@@ -60,6 +60,36 @@ class FourierPositionalBias(nn.Module):
         bias = torch.matmul(rff, self.a)
         return bias
 
+# %%
+class Embedder(nn.Module):
+    def __init__(self,
+                 d_model,
+                 compute_device=None):
+        super().__init__()
+        self.d_model = d_model
+        self.compute_device = compute_device
+
+        elem_dir = 'madani/data/element_properties'
+        # # Choose what element information the model receives
+        mat2vec = f'{elem_dir}/mat2vec.csv'  # element embedding
+        # mat2vec = f'{elem_dir}/onehot.csv'  # onehot encoding (atomic number)
+        # mat2vec = f'{elem_dir}/random_200.csv'  # random vec for elements
+        # mat2vec = f'{elem_dir}/oliynyk.csv'  # random vec for elements
+        # mat2vec = f'{elem_dir}/magpie.csv'  # random vec for elements
+
+        cbfv = pd.read_csv(mat2vec, index_col=0).values
+        feat_size = cbfv.shape[-1]
+        self.fc_mat2vec = nn.Linear(feat_size, d_model).to(self.compute_device)
+        zeros = np.zeros((1, feat_size))
+        cat_array = np.concatenate([zeros, cbfv])
+        cat_array = torch.as_tensor(cat_array, dtype=data_type_torch)
+        self.cbfv = nn.Embedding.from_pretrained(cat_array) \
+            .to(self.compute_device, dtype=data_type_torch)
+
+    def forward(self, src):
+        mat2vec_emb = self.cbfv(src)
+        x_emb = self.fc_mat2vec(mat2vec_emb)
+        return x_emb
 
 class MoEFeedForwardTop2(nn.Module):
     """
