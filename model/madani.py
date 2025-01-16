@@ -325,91 +325,108 @@ class MoEFeedForwardTop2(nn.Module):
         return out
 
 
+# class CustomTransformerEncoderMoELayerStoich(nn.Module):
 class CustomTransformerEncoderMoELayerStoich(nn.Module):
-# class CustomTransformerEncoderLayerFracResidual(nn.Module):
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, layer_norm_eps=0.00001):
+    def __init__(self, 
+                 d_model, 
+                 nhead,
+                 dim_feedforward=2048,
+                 dropout=0.1,
+                 layer_norm_eps=1e-5,
+                 num_experts=4,
+                 gating_noise=0.0):
         super().__init__()
+        
+        # Stoich-based multi-head attention
         self.self_attn = CustomMultiHeadAttentionStoich(d_model, nhead, dropout=dropout)
-        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
-        self.dropout1 = nn.Dropout(dropout)
 
+        # MoE feed-forward
         self.feed_forward = MoEFeedForwardTop2(
             d_model=d_model,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
-            num_experts=4,
-            gating_noise=0.0
+            num_experts=num_experts,
+            gating_noise=gating_noise
         )
+
+        # LayerNorms and Dropouts
+        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
         self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
+        self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
-        # Fraction-based MLP => [1 -> d_model]
+        # -----------------------------------------------------------------------
+        # (A) Fractional MLP or "encoder" to generate a bias vector [d_model]
+        # -----------------------------------------------------------------------
         self.frac_mlp = nn.Sequential(
-            nn.Linear(1, d_model),
+            nn.Linear(1, d_model),   # from scalar fraction to d_model
             nn.ReLU(),
             nn.Linear(d_model, d_model)
         )
 
-        # Optional gate
-        self.frac_gate = nn.Sequential(
-            nn.Linear(1, d_model),
-            nn.Sigmoid()
-        )
-
     def forward(self, src, frac, src_mask=None, src_key_padding_mask=None):
         """
-        src: [B, T, d_model]
-        frac: [B, T]
+        Args:
+            src: [B, T, d_model] hidden representation
+            frac: [B, T] stoichiometric fractions
         """
-        # 1) Self-attention
+        # 1) Stoich-based self-attention
         attn_out = self.self_attn(
-            src, src, src,
+            query=src,
+            key=src,
+            value=src,
+            frac=frac,
             key_padding_mask=src_key_padding_mask,
             attn_mask=src_mask
         )
         attn_out = self.dropout1(attn_out)
 
-        # 2) Compute stoich bias
+        # -----------------------------------------------------------------------
+        # (B) Compute an extra fraction-based bias to add into the residual
+        # -----------------------------------------------------------------------
         stoich_bias = self.compute_stoich_bias(frac)  # [B, T, d_model]
-        # optional gating
-        gate = self.frac_gate(frac.unsqueeze(-1))     # same shape
-        stoich_bias = stoich_bias * gate
 
-        # 3) Residual: x + attn_out + stoich_bias
+        # 2) Residual connection = src + attn_out + stoich_bias
         src = src + attn_out + stoich_bias
         src = self.norm1(src)
 
-        # 4) Feed-forward
+        # 3) MoE feed-forward
         ff_out = self.feed_forward(src)
         ff_out = self.dropout2(ff_out)
         src = src + ff_out
         src = self.norm2(src)
+
         return src
 
     def compute_stoich_bias(self, frac):
         """
-        frac: [B, T]
-        returns [B, T, d_model]
+        frac: [B, T], each is a scalar fraction
+        returns: [B, T, d_model] to be added in the residual
         """
         B, T = frac.shape
-        frac_flat = frac.view(B*T, 1)
-        bias_flat = self.frac_mlp(frac_flat)  # => [B*T, d_model]
-        return bias_flat.view(B, T, -1)
+        # Flatten: [B*T, 1]
+        frac_flat = frac.view(B*T, 1)  # shape [B*T, 1]
 
+        # MLP -> shape [B*T, d_model]
+        bias_flat = self.frac_mlp(frac_flat)
+
+        # Reshape back -> [B, T, d_model]
+        return bias_flat.view(B, T, -1)
 
 
 class CustomTransformerEncoderMoEStoich(nn.Module):
     def __init__(self, encoder_layer, num_layers):
         super().__init__()
         self.layers = nn.ModuleList([encoder_layer for _ in range(num_layers)])
-        # no final LayerNorm for simplicity
 
     def forward(self, src, frac, mask=None, src_key_padding_mask=None):
         out = src
         for layer in self.layers:
-            out = layer(out, frac=frac,
-                        src_mask=mask,
-                        src_key_padding_mask=src_key_padding_mask)
+            out = layer(
+                out, frac=frac,
+                src_mask=mask,
+                src_key_padding_mask=src_key_padding_mask
+            )
         return out
 
 
