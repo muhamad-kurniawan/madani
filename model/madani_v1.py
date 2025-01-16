@@ -139,7 +139,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class CustomMultiHeadAttention(nn.Module):
+class CustomMultiHeadAttentionStoich(nn.Module):
+    """
+    Multi-Head Attention with a per-head bias based on stoichiometric differences.
+    Each head has two learned parameters: alpha_pos[h], alpha_neg[h].
+    The attention logits get a bias:
+        alpha_pos[h] * max(frac_j - frac_i, 0) + alpha_neg[h] * min(frac_j - frac_i, 0).
+    """
     def __init__(self, d_model, nhead, dropout=0.1):
         super().__init__()
         assert d_model % nhead == 0, "d_model must be divisible by nhead"
@@ -157,17 +163,33 @@ class CustomMultiHeadAttention(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
-        # Scaled factor for dot-product attention
-        self.scale = self.head_dim**-0.5
+        # Scale factor for dot-product
+        self.scale = self.head_dim ** -0.5
+
+        # Two learnable bias parameters per head (for positive & negative differences)
+        self.alpha_pos = nn.Parameter(torch.zeros(nhead))  # [nhead]
+        self.alpha_neg = nn.Parameter(torch.zeros(nhead))  # [nhead]
 
     def forward(
         self,
         query,              # [B, T, d_model]
         key,                # [B, T, d_model]
         value,              # [B, T, d_model]
-        key_padding_mask=None,  # [B, T] mask where True indicates padding
+        frac,               # [B, T] stoichiometric fractions
+        key_padding_mask=None,  # [B, T] True means "ignore"
         attn_mask=None          # optional attn mask [T, T] or [B, T, T]
     ):
+        """
+        Args:
+            query: [B, T, d_model]
+            key:   [B, T, d_model]
+            value: [B, T, d_model]
+            frac:  [B, T] stoichiometric fractions for each element
+            key_padding_mask: [B, T] (True = masked out)
+            attn_mask: optional [T, T] or [B, T, T]
+        Returns:
+            out: [B, T, d_model]
+        """
         B, T, _ = query.shape
 
         # 1) Project Q, K, V
@@ -176,37 +198,61 @@ class CustomMultiHeadAttention(nn.Module):
         V = self.W_v(value)  # [B, T, d_model]
 
         # 2) Reshape to [B, nhead, T, head_dim]
-        Q = Q.view(B, T, self.nhead, self.head_dim).transpose(1, 2)  # [B, nhead, T, head_dim]
-        K = K.view(B, T, self.nhead, self.head_dim).transpose(1, 2)  # [B, nhead, T, head_dim]
-        V = V.view(B, T, self.nhead, self.head_dim).transpose(1, 2)  # [B, nhead, T, head_dim]
+        Q = Q.view(B, T, self.nhead, self.head_dim).transpose(1, 2)  # -> [B, nhead, T, head_dim]
+        K = K.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
+        V = V.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
 
-        # 3) Compute scaled dot-product attention
-        # attn_weights shape = [B, nhead, T_q, T_k]
+        # 3) Compute scaled dot-product attention logits
+        # shape = [B, nhead, T_q, T_k]
         attn_weights = torch.matmul(Q, K.transpose(-1, -2)) * self.scale
 
-        # If attn_mask is provided (e.g., subsequent mask), apply it
+        # 4) Compute stoichiometric difference: D[b, i, j] = frac[b, j] - frac[b, i]
+        # shape => [B, T, T]
+        frac_i = frac.unsqueeze(2)    # [B, T, 1]
+        frac_j = frac.unsqueeze(1)    # [B, 1, T]
+        D = frac_j - frac_i           # [B, T, T]
+
+        # positive part & negative part
+        #  D_pos = relu(D), D_neg = "negative part" of D
+        D_pos = torch.relu(D)             # [B, T, T] (zeros out negative)
+        D_neg = -torch.relu(-D)           # [B, T, T] (zeros out positive)
+
+        # 5) Expand for nheads
+        # alpha_pos, alpha_neg => shape [nhead]
+        # We'll expand to [B, nhead, T, T]
+        alpha_pos = self.alpha_pos.view(1, self.nhead, 1, 1)  # [1, nhead, 1, 1]
+        alpha_neg = self.alpha_neg.view(1, self.nhead, 1, 1)  # [1, nhead, 1, 1]
+
+        D_pos_exp = D_pos.unsqueeze(1)  # [B, 1, T, T]
+        D_neg_exp = D_neg.unsqueeze(1)  # [B, 1, T, T]
+
+        stoich_bias = alpha_pos * D_pos_exp + alpha_neg * D_neg_exp
+        # shape => [B, nhead, T, T]
+
+        # 6) Add stoichiometry bias to attention logits
+        attn_weights = attn_weights + stoich_bias
+
+        # 7) Apply optional masks
         if attn_mask is not None:
-            # attn_mask can be [T, T], [B, T, T], or broadcastable
             attn_weights = attn_weights + attn_mask
 
-        # key_padding_mask shape = [B, T_k], True means "ignore"
-        # We can expand this to [B, 1, 1, T_k] then broadcast
         if key_padding_mask is not None:
-            expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, T_k]
-            # We add a large negative value where mask is True
+            expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, T]
             attn_weights = attn_weights.masked_fill(expanded_mask, float('-inf'))
 
+        # 8) Softmax and dropout
         attn_probs = F.softmax(attn_weights, dim=-1)
         attn_probs = self.dropout(attn_probs)
 
-        # 4) Get the attention output
-        out = torch.matmul(attn_probs, V)  # [B, nhead, T_q, head_dim]
+        # 9) Weighted sum of values
+        out = torch.matmul(attn_probs, V)  # [B, nhead, T, head_dim]
 
-        # 5) Reshape back to [B, T_q, d_model]
+        # 10) Reshape back to [B, T, d_model]
         out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
 
-        # 6) Final linear projection
+        # 11) Final linear projection
         out = self.out_proj(out)
+
         return out
 
 class MoEFeedForwardTop2(nn.Module):
@@ -296,7 +342,7 @@ class MoEFeedForwardTop2(nn.Module):
 
         return out
 
-class CustomTransformerEncoderMoELayer(nn.Module):
+class CustomTransformerEncoderMoELayerStoich(nn.Module):
     def __init__(self, 
                  d_model, 
                  nhead,
@@ -306,10 +352,10 @@ class CustomTransformerEncoderMoELayer(nn.Module):
                  num_experts=4,
                  gating_noise=0.0):
         super().__init__()
-        # Self-attention block
-        self.self_attn = CustomMultiHeadAttention(d_model, nhead, dropout=dropout)
+        # Replace standard attention with Stoich-based attention
+        self.self_attn = CustomMultiHeadAttentionStoich(d_model, nhead, dropout=dropout)
 
-        # MoE feed-forward with top-2 gating + gating noise
+        # MoE feed-forward (top-2 gating)
         self.feed_forward = MoEFeedForwardTop2(
             d_model=d_model,
             dim_feedforward=dim_feedforward,
@@ -325,10 +371,20 @@ class CustomTransformerEncoderMoELayer(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
-    def forward(self, src, src_mask=None, src_key_padding_mask=None):
-        # 1) Self-attention
+    def forward(self, src, frac, src_mask=None, src_key_padding_mask=None):
+        """
+        Args:
+            src: [B, T, d_model]
+            frac: [B, T]
+            src_mask: optional [T, T] or [B, T, T]
+            src_key_padding_mask: [B, T]
+        """
+        # 1) Stoich-based self-attention
         attn_out = self.self_attn(
-            src, src, src,
+            query=src,
+            key=src,
+            value=src,
+            frac=frac,
             key_padding_mask=src_key_padding_mask,
             attn_mask=src_mask
         )
@@ -344,19 +400,27 @@ class CustomTransformerEncoderMoELayer(nn.Module):
 
 
 
-class CustomTransformerEncoderMoE(nn.Module):
+class CustomTransformerEncoderMoEStoich(nn.Module):
     def __init__(self, encoder_layer, num_layers):
         super().__init__()
         self.layers = nn.ModuleList([encoder_layer for _ in range(num_layers)])
-        # We omit final LayerNorm for simplicity
+        # Omit final LayerNorm for simplicity
 
-    def forward(self, src, mask=None, src_key_padding_mask=None):
+    def forward(self, src, frac, mask=None, src_key_padding_mask=None):
+        """
+        Args:
+            src: [B, T, d_model]
+            frac: [B, T]
+            mask: optional attn mask
+            src_key_padding_mask: [B, T]
+        """
         output = src
         for layer in self.layers:
-            output = layer(output,
+            output = layer(output, frac=frac,
                            src_mask=mask,
                            src_key_padding_mask=src_key_padding_mask)
         return output
+
 
 
 import pandas as pd
@@ -373,7 +437,7 @@ import torch.nn as nn
 # Reuse the same fraction encoders, embedder, etc. from your original code
 # Reuse the same CustomMultiHeadAttention from your previous custom attention code
 
-class EncoderMoE(nn.Module):
+class EncoderMoEStoich(nn.Module):
     def __init__(self,
                  d_model,
                  N,
@@ -402,7 +466,8 @@ class EncoderMoE(nn.Module):
         self.pos_scaler_log = nn.parameter.Parameter(torch.tensor([1.]))
 
         if self.attention:
-            encoder_layer = CustomTransformerEncoderMoELayer(
+            # Use the *Stoich* versions of layer + encoder
+            encoder_layer = CustomTransformerEncoderMoELayerStoich(
                 d_model=self.d_model,
                 nhead=self.heads,
                 dim_feedforward=2048,
@@ -411,18 +476,23 @@ class EncoderMoE(nn.Module):
                 num_experts=num_experts,
                 gating_noise=gating_noise
             )
-            self.transformer_encoder = CustomTransformerEncoderMoE(
+            self.transformer_encoder = CustomTransformerEncoderMoEStoich(
                 encoder_layer=encoder_layer,
                 num_layers=self.N
             )
 
     def forward(self, src, frac):
+        """
+        src: [B, T] with element indices
+        frac: [B, T] stoichiometric fractions
+        """
         print(f'frac {frac}')
         x = self.embed(src) * 2**self.emb_scaler
 
         src_key_padding_mask = (frac == 0)
         pe = torch.zeros_like(x)
         ple = torch.zeros_like(x)
+
         pe_scaler = 2**((1 - self.pos_scaler)**2)
         ple_scaler = 2**((1 - self.pos_scaler_log)**2)
         pe[:, :, :self.d_model//2] = self.pe(frac) * pe_scaler
@@ -430,8 +500,10 @@ class EncoderMoE(nn.Module):
 
         if self.attention:
             x_src = x + pe + ple
+            # Now pass frac to the stoich-based encoder
             x = self.transformer_encoder(
                 x_src,
+                frac=frac,             # <--- pass stoichiometry
                 mask=None,
                 src_key_padding_mask=src_key_padding_mask
             )
@@ -442,6 +514,7 @@ class EncoderMoE(nn.Module):
         hmask = (frac == 0).unsqueeze(-1).repeat(1, 1, self.d_model)
         x = x.masked_fill(hmask, 0)
         return x
+
 
 
 class Madani(nn.Module):
@@ -462,7 +535,8 @@ class Madani(nn.Module):
         self.heads = heads
         self.compute_device = compute_device
 
-        self.encoder = EncoderMoE(
+        # Use the Stoich version of EncoderMoE
+        self.encoder = EncoderMoEStoich(
             d_model=self.d_model,
             N=self.N,
             heads=self.heads,
@@ -479,6 +553,10 @@ class Madani(nn.Module):
             self.output_nn = ResidualNetwork(self.d_model, self.out_dims, self.out_hidden)
 
     def forward(self, src, frac):
+        """
+        src: [B, T], each element is an index (0=pad)
+        frac: [B, T], stoichiometric fractions
+        """
         output = self.encoder(src, frac)
         mask = (src == 0).unsqueeze(-1).repeat(1, 1, self.out_dims)
         output = self.output_nn(output)
@@ -486,6 +564,7 @@ class Madani(nn.Module):
         if self.avg:
             output = output.masked_fill(mask, 0)
             output = output.sum(dim=1) / (~mask).sum(dim=1)
+            # separate final outputs from logits
             output, logits = output.chunk(2, dim=-1)
             probability = torch.ones_like(output)
             probability[:, :logits.shape[-1]] = torch.sigmoid(logits)
