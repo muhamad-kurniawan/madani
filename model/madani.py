@@ -224,10 +224,10 @@ class CustomMultiHeadAttentionStoich(nn.Module):
         stoich_bias = self._zscore_last_dim(stoich_bias)
 
         # 6) Weighted mix
-        if not add_frac_bias:
-            self.delta = nn.Parameter(torch.tensor(0))
-        attn_weights = self.gamma * dotprod_logits + self.delta * stoich_bias
-
+        if add_frac_bias:
+            attn_weights = self.gamma * dotprod_logits + self.delta * stoich_bias
+        else:
+            attn_weights = self.gamma * dotprod_logits
         # 7) Masks
         if attn_mask is not None:
             attn_weights = attn_weights + attn_mask
