@@ -326,50 +326,76 @@ class MoEFeedForwardTop2(nn.Module):
 
 
 class CustomTransformerEncoderMoELayerStoich(nn.Module):
-    def __init__(self, 
-                 d_model, 
-                 nhead,
-                 dim_feedforward=2048,
-                 dropout=0.1,
-                 layer_norm_eps=1e-5,
-                 num_experts=4,
-                 gating_noise=0.0):
+# class CustomTransformerEncoderLayerFracResidual(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
         super().__init__()
         self.self_attn = CustomMultiHeadAttentionStoich(d_model, nhead, dropout=dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
 
         self.feed_forward = MoEFeedForwardTop2(
             d_model=d_model,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
-            num_experts=num_experts,
-            gating_noise=gating_noise
+            num_experts=4,
+            gating_noise=0.0
         )
-
-        # Norms
-        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
-        self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
-        self.dropout1 = nn.Dropout(dropout)
+        self.norm2 = nn.LayerNorm(d_model)
         self.dropout2 = nn.Dropout(dropout)
 
+        # Fraction-based MLP => [1 -> d_model]
+        self.frac_mlp = nn.Sequential(
+            nn.Linear(1, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model)
+        )
+
+        # Optional gate
+        self.frac_gate = nn.Sequential(
+            nn.Linear(1, d_model),
+            nn.Sigmoid()
+        )
+
     def forward(self, src, frac, src_mask=None, src_key_padding_mask=None):
-        # Stoich-based self-attention
+        """
+        src: [B, T, d_model]
+        frac: [B, T]
+        """
+        # 1) Self-attention
         attn_out = self.self_attn(
-            query=src,
-            key=src,
-            value=src,
-            frac=frac,
+            src, src, src,
             key_padding_mask=src_key_padding_mask,
             attn_mask=src_mask
         )
-        src = src + self.dropout1(attn_out)
+        attn_out = self.dropout1(attn_out)
+
+        # 2) Compute stoich bias
+        stoich_bias = self.compute_stoich_bias(frac)  # [B, T, d_model]
+        # optional gating
+        gate = self.frac_gate(frac.unsqueeze(-1))     # same shape
+        stoich_bias = stoich_bias * gate
+
+        # 3) Residual: x + attn_out + stoich_bias
+        src = src + attn_out + stoich_bias
         src = self.norm1(src)
 
-        # MoE feed-forward
+        # 4) Feed-forward
         ff_out = self.feed_forward(src)
-        src = src + self.dropout2(ff_out)
+        ff_out = self.dropout2(ff_out)
+        src = src + ff_out
         src = self.norm2(src)
-
         return src
+
+    def compute_stoich_bias(self, frac):
+        """
+        frac: [B, T]
+        returns [B, T, d_model]
+        """
+        B, T = frac.shape
+        frac_flat = frac.view(B*T, 1)
+        bias_flat = self.frac_mlp(frac_flat)  # => [B*T, d_model]
+        return bias_flat.view(B, T, -1)
+
 
 
 class CustomTransformerEncoderMoEStoich(nn.Module):
