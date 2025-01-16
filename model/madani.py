@@ -142,61 +142,54 @@ import torch.nn.functional as F
 # class CustomMultiHeadAttention(nn.Module):
 class CustomMultiHeadAttentionStoich(nn.Module):
     """
-    Multi-Head Attention that mixes:
-        gamma * (QK^T) + delta * stoich_bias
-    and also clamps D = (frac_j - frac_i) within some range, e.g. [-0.2, 0.2].
+    Multi-Head Attention that does:
+        1) compute dotprod_logits = QK^T
+        2) compute stoich_bias based on frac_j - frac_i
+        3) z-score normalize each separately
+        4) combine them as gamma * dotprod_logits + delta * stoich_bias
     """
-    def __init__(self, d_model, nhead, dropout=0.1, clamp_min=-0.2, clamp_max=0.2):
+    def __init__(self, d_model, nhead, dropout=0.1):
         super().__init__()
         assert d_model % nhead == 0, "d_model must be divisible by nhead"
         self.d_model = d_model
         self.nhead = nhead
         self.head_dim = d_model // nhead
 
-        # Hyperparams for clamping
-        self.clamp_min = clamp_min
-        self.clamp_max = clamp_max
-
-        # Linear layers for Q, K, V
         self.W_q = nn.Linear(d_model, d_model)
         self.W_k = nn.Linear(d_model, d_model)
         self.W_v = nn.Linear(d_model, d_model)
-
-        # Output projection
         self.out_proj = nn.Linear(d_model, d_model)
 
         self.dropout = nn.Dropout(dropout)
-
-        # Scale factor for dot-product
         self.scale = self.head_dim ** -0.5
 
-        # Per-head alpha for positive & negative differences
-        self.alpha_pos = nn.Parameter(torch.zeros(nhead))  # shape [nhead]
-        self.alpha_neg = nn.Parameter(torch.zeros(nhead))  # shape [nhead]
+        # Two per-head stoich parameters for positive/negative difference
+        self.alpha_pos = nn.Parameter(torch.zeros(nhead))
+        self.alpha_neg = nn.Parameter(torch.zeros(nhead))
 
-        # Weighted mix parameters
-        self.gamma = nn.Parameter(torch.tensor(1.0))  # scale for QK^T
-        self.delta = nn.Parameter(torch.tensor(0.5))  # scale for stoich_bias
+        # Weighted mix parameters for final combination
+        self.gamma = nn.Parameter(torch.tensor(1.0))
+        self.delta = nn.Parameter(torch.tensor(1.0))
 
     def forward(
         self,
-        query,                 # [B, T, d_model]
-        key,                   # [B, T, d_model]
-        value,                 # [B, T, d_model]
-        frac,                  # [B, T], stoichiometric fractions
-        key_padding_mask=None, # [B, T] (True means ignore)
-        attn_mask=None         # [T, T] or [B, T, T]
+        query,               # [B, T, d_model]
+        key,                 # [B, T, d_model]
+        value,               # [B, T, d_model]
+        frac,                # [B, T]
+        key_padding_mask=None,  
+        attn_mask=None       
     ):
         """
         Args:
             query: [B, T, d_model]
             key:   [B, T, d_model]
             value: [B, T, d_model]
-            frac:  [B, T] stoichiometric fractions for each element
+            frac:  [B, T], stoichiometric fractions
         """
         B, T, _ = query.shape
 
-        # 1) Project Q, K, V
+        # 1) Q, K, V
         Q = self.W_q(query)
         K = self.W_k(key)
         V = self.W_v(value)
@@ -206,34 +199,33 @@ class CustomMultiHeadAttentionStoich(nn.Module):
         K = K.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
         V = V.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
 
-        # 3) Standard dot-product attention logits => [B, nhead, T, T]
+        # 3) Standard dot-product => shape [B, nhead, T, T]
         dotprod_logits = torch.matmul(Q, K.transpose(-1, -2)) * self.scale
 
         # 4) Stoichiometric difference => D = frac_j - frac_i => [B, T, T]
         frac_i = frac.unsqueeze(-1)  # => [B, T, 1]
         frac_j = frac.unsqueeze(1)   # => [B, 1, T]
-        D = frac_j - frac_i
+        D = frac_j - frac_i          # => [B, T, T]
 
-        # -- CLAMP D here:
-        # D = torch.clamp(D, min=self.clamp_min, max=self.clamp_max)
+        # Positive & negative split
+        D_pos = F.relu(D)      # zero out negatives
+        D_neg = -F.relu(-D)    # zero out positives
 
-        # 5) Positive & negative parts => [B, T, T]
-        D_pos = F.relu(D)           # zero out negatives
-        D_neg = -F.relu(-D)         # zero out positives
-
-        # Expand for nheads => [B, nhead, T, T]
+        # expand => [B, nhead, T, T]
         alpha_pos = self.alpha_pos.view(1, self.nhead, 1, 1)
         alpha_neg = self.alpha_neg.view(1, self.nhead, 1, 1)
-        stoich_bias = (
-            alpha_pos * D_pos.unsqueeze(1) +
-            alpha_neg * D_neg.unsqueeze(1)
-        )
+        stoich_bias = alpha_pos * D_pos.unsqueeze(1) + alpha_neg * D_neg.unsqueeze(1)
 
-        # 6) Weighted mix:
-        #    attn_weights = gamma * dotprod + delta * stoich_bias
+        # 5) (Optional) z-score normalize each of dotprod_logits, stoich_bias
+        #    We'll do a simple approach: mean & std across the last dimension (-1)
+        #    i.e., each [B, nhead, T, T] is normalized T_k-dimension wise.
+        dotprod_logits = self._zscore_last_dim(dotprod_logits)
+        stoich_bias = self._zscore_last_dim(stoich_bias)
+
+        # 6) Weighted mix
         attn_weights = self.gamma * dotprod_logits + self.delta * stoich_bias
 
-        # 7) Apply optional masks
+        # 7) Masks
         if attn_mask is not None:
             attn_weights = attn_weights + attn_mask
 
@@ -241,7 +233,7 @@ class CustomMultiHeadAttentionStoich(nn.Module):
             expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
             attn_weights = attn_weights.masked_fill(expanded_mask, float('-inf'))
 
-        # 8) Softmax + dropout => [B, nhead, T, T]
+        # 8) Softmax
         attn_probs = F.softmax(attn_weights, dim=-1)
         attn_probs = self.dropout(attn_probs)
 
@@ -251,9 +243,22 @@ class CustomMultiHeadAttentionStoich(nn.Module):
         # 10) Reshape => [B, T, d_model]
         out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
 
-        # 11) Final linear projection
+        # 11) Final projection
         out = self.out_proj(out)
         return out
+
+    @staticmethod
+    def _zscore_last_dim(tensor, eps=1e-5):
+        """
+        z-score normalize across the last dimension of shape [B, nhead, T, T].
+        i.e. for each (B, nhead, T_q) slice, we standardize across T_k:
+          t' = (t - mean_tk) / (std_tk + eps)
+        """
+        # shape of tensor => [B, nhead, T_q, T_k]
+        # we want mean & std over the last dimension => T_k
+        mean = tensor.mean(dim=-1, keepdim=True)
+        std = tensor.std(dim=-1, keepdim=True)
+        return (tensor - mean) / (std + eps)
         
 class MoEFeedForwardTop2(nn.Module):
     """
