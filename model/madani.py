@@ -178,7 +178,8 @@ class CustomMultiHeadAttentionStoich(nn.Module):
         value,               # [B, T, d_model]
         frac,                # [B, T]
         key_padding_mask=None,  
-        attn_mask=None       
+        attn_mask=None,
+        add_frac_bias=None
     ):
         """
         Args:
@@ -223,6 +224,8 @@ class CustomMultiHeadAttentionStoich(nn.Module):
         stoich_bias = self._zscore_last_dim(stoich_bias)
 
         # 6) Weighted mix
+        if not add_frac_bias:
+            self.delta = nn.Parameter(torch.tensor(0))
         attn_weights = self.gamma * dotprod_logits + self.delta * stoich_bias
 
         # 7) Masks
@@ -377,7 +380,8 @@ class CustomTransformerEncoderMoELayerStoich(nn.Module):
             value=src,
             frac=frac,
             key_padding_mask=src_key_padding_mask,
-            attn_mask=src_mask
+            attn_mask=src_mask,
+            add_frac_bias=add_frac_bias
         )
         attn_out = self.dropout1(attn_out)
 
