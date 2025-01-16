@@ -327,10 +327,10 @@ class MoEFeedForwardTop2(nn.Module):
 
 class CustomTransformerEncoderMoELayerStoich(nn.Module):
 # class CustomTransformerEncoderLayerFracResidual(nn.Module):
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, layer_norm_eps=0.00001):
         super().__init__()
         self.self_attn = CustomMultiHeadAttentionStoich(d_model, nhead, dropout=dropout)
-        self.norm1 = nn.LayerNorm(d_model)
+        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
         self.dropout1 = nn.Dropout(dropout)
 
         self.feed_forward = MoEFeedForwardTop2(
@@ -340,7 +340,7 @@ class CustomTransformerEncoderMoELayerStoich(nn.Module):
             num_experts=4,
             gating_noise=0.0
         )
-        self.norm2 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
         self.dropout2 = nn.Dropout(dropout)
 
         # Fraction-based MLP => [1 -> d_model]
