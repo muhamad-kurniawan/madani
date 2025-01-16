@@ -142,17 +142,20 @@ import torch.nn.functional as F
 # class CustomMultiHeadAttention(nn.Module):
 class CustomMultiHeadAttentionStoich(nn.Module):
     """
-    Multi-Head Attention with a per-head bias based on stoichiometric differences.
-    Each head has two learned parameters: alpha_pos[h], alpha_neg[h].
-    The attention logits get a bias:
-         alpha_pos[h] * max(frac_j - frac_i, 0) + alpha_neg[h] * min(frac_j - frac_i, 0).
+    Multi-Head Attention that mixes:
+        gamma * (QK^T) + delta * stoich_bias
+    and also clamps D = (frac_j - frac_i) within some range, e.g. [-0.2, 0.2].
     """
-    def __init__(self, d_model, nhead, dropout=0.1):
+    def __init__(self, d_model, nhead, dropout=0.1, clamp_min=-0.2, clamp_max=0.2):
         super().__init__()
         assert d_model % nhead == 0, "d_model must be divisible by nhead"
         self.d_model = d_model
         self.nhead = nhead
         self.head_dim = d_model // nhead
+
+        # Hyperparams for clamping
+        self.clamp_min = clamp_min
+        self.clamp_max = clamp_max
 
         # Linear layers for Q, K, V
         self.W_q = nn.Linear(d_model, d_model)
@@ -163,56 +166,74 @@ class CustomMultiHeadAttentionStoich(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model)
 
         self.dropout = nn.Dropout(dropout)
+
+        # Scale factor for dot-product
         self.scale = self.head_dim ** -0.5
 
-        # Two learnable bias parameters per head
+        # Per-head alpha for positive & negative differences
         self.alpha_pos = nn.Parameter(torch.zeros(nhead))  # shape [nhead]
         self.alpha_neg = nn.Parameter(torch.zeros(nhead))  # shape [nhead]
 
+        # Weighted mix parameters
+        self.gamma = nn.Parameter(torch.tensor(1.0))  # scale for QK^T
+        self.delta = nn.Parameter(torch.tensor(1.0))  # scale for stoich_bias
+
     def forward(
         self,
-        query,              # [B, T, d_model]
-        key,                # [B, T, d_model]
-        value,              # [B, T, d_model]
-        frac,               # [B, T], stoichiometric fractions
-        key_padding_mask=None,  # [B, T] (True means ignore)
-        attn_mask=None          # [T, T] or [B, T, T]
+        query,                 # [B, T, d_model]
+        key,                   # [B, T, d_model]
+        value,                 # [B, T, d_model]
+        frac,                  # [B, T], stoichiometric fractions
+        key_padding_mask=None, # [B, T] (True means ignore)
+        attn_mask=None         # [T, T] or [B, T, T]
     ):
+        """
+        Args:
+            query: [B, T, d_model]
+            key:   [B, T, d_model]
+            value: [B, T, d_model]
+            frac:  [B, T] stoichiometric fractions for each element
+        """
         B, T, _ = query.shape
 
         # 1) Project Q, K, V
-        Q = self.W_q(query)  # [B, T, d_model]
-        K = self.W_k(key)    # [B, T, d_model]
-        V = self.W_v(value)  # [B, T, d_model]
+        Q = self.W_q(query)
+        K = self.W_k(key)
+        V = self.W_v(value)
 
-        # 2) Reshape to [B, nhead, T, head_dim]
+        # 2) Reshape [B, T, d_model] => [B, nhead, T, head_dim]
         Q = Q.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
         K = K.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
         V = V.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
 
-        # 3) Dot-product attention logits => [B, nhead, T, T]
-        attn_weights = torch.matmul(Q, K.transpose(-1, -2)) * self.scale
+        # 3) Standard dot-product attention logits => [B, nhead, T, T]
+        dotprod_logits = torch.matmul(Q, K.transpose(-1, -2)) * self.scale
 
-        # 4) Stoichiometric difference => frac_j - frac_i
+        # 4) Stoichiometric difference => D = frac_j - frac_i => [B, T, T]
         frac_i = frac.unsqueeze(-1)  # => [B, T, 1]
         frac_j = frac.unsqueeze(1)   # => [B, 1, T]
-        D = frac_j - frac_i          # => [B, T, T]
+        D = frac_j - frac_i
 
-        # Positive part & negative part
-        D_pos = F.relu(D)           
-        D_neg = -F.relu(-D)         
+        # -- CLAMP D here:
+        D = torch.clamp(D, min=self.clamp_min, max=self.clamp_max)
 
-        # Expand for nheads
-        alpha_pos = self.alpha_pos.view(1, self.nhead, 1, 1)  # => [1, nhead, 1, 1]
-        alpha_neg = self.alpha_neg.view(1, self.nhead, 1, 1)  
-        D_pos_exp = D_pos.unsqueeze(1)  # => [B, 1, T, T]
-        D_neg_exp = D_neg.unsqueeze(1)  # => [B, 1, T, T]
+        # 5) Positive & negative parts => [B, T, T]
+        D_pos = F.relu(D)           # zero out negatives
+        D_neg = -F.relu(-D)         # zero out positives
 
-        # Add stoich bias
-        stoich_bias = alpha_pos * D_pos_exp + alpha_neg * D_neg_exp
-        attn_weights = attn_weights + stoich_bias
+        # Expand for nheads => [B, nhead, T, T]
+        alpha_pos = self.alpha_pos.view(1, self.nhead, 1, 1)
+        alpha_neg = self.alpha_neg.view(1, self.nhead, 1, 1)
+        stoich_bias = (
+            alpha_pos * D_pos.unsqueeze(1) +
+            alpha_neg * D_neg.unsqueeze(1)
+        )
 
-        # 5) Masks
+        # 6) Weighted mix:
+        #    attn_weights = gamma * dotprod + delta * stoich_bias
+        attn_weights = self.gamma * dotprod_logits + self.delta * stoich_bias
+
+        # 7) Apply optional masks
         if attn_mask is not None:
             attn_weights = attn_weights + attn_mask
 
@@ -220,17 +241,17 @@ class CustomMultiHeadAttentionStoich(nn.Module):
             expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
             attn_weights = attn_weights.masked_fill(expanded_mask, float('-inf'))
 
-        # 6) Softmax
+        # 8) Softmax + dropout => [B, nhead, T, T]
         attn_probs = F.softmax(attn_weights, dim=-1)
         attn_probs = self.dropout(attn_probs)
 
-        # 7) Weighted sum of V
-        out = torch.matmul(attn_probs, V)  # => [B, nhead, T, head_dim]
+        # 9) Weighted sum of V => [B, nhead, T, head_dim]
+        out = torch.matmul(attn_probs, V)
 
-        # 8) Reshape => [B, T, d_model]
+        # 10) Reshape => [B, T, d_model]
         out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
 
-        # 9) Final projection
+        # 11) Final linear projection
         out = self.out_proj(out)
         return out
         
