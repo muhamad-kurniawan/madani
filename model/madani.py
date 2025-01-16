@@ -334,13 +334,12 @@ class CustomTransformerEncoderMoELayerStoich(nn.Module):
                  dropout=0.1,
                  layer_norm_eps=1e-5,
                  num_experts=4,
-                 gating_noise=0.0,
-                 add_frac_bias=False):
+                 gating_noise=0.0):
         super().__init__()
         
         # Stoich-based multi-head attention
         self.self_attn = CustomMultiHeadAttentionStoich(d_model, nhead, dropout=dropout)
-        self.add_frac_bias = add_frac_bias
+
         # MoE feed-forward
         self.feed_forward = MoEFeedForwardTop2(
             d_model=d_model,
@@ -365,7 +364,7 @@ class CustomTransformerEncoderMoELayerStoich(nn.Module):
             nn.Linear(d_model, d_model)
         )
 
-    def forward(self, src, frac, src_mask=None, src_key_padding_mask=None):
+    def forward(self, src, frac, src_mask=None, src_key_padding_mask=None,add_frac_bias=False):
         """
         Args:
             src: [B, T, d_model] hidden representation
@@ -385,7 +384,7 @@ class CustomTransformerEncoderMoELayerStoich(nn.Module):
         # -----------------------------------------------------------------------
         # (B) Compute an extra fraction-based bias to add into the residual
         # -----------------------------------------------------------------------
-        if self.add_frac_bias:
+        if add_frac_bias:
             stoich_bias = self.compute_stoich_bias(frac)  # [B, T, d_model]
         
             
