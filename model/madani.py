@@ -140,7 +140,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # class CustomMultiHeadAttention(nn.Module):
-class CustomMultiHeadAttention(nn.Module):
+class CustomMultiHeadAttentionStoich(nn.Module):
     """
     Multi-Head Attention with a per-head bias based on stoichiometric differences.
     Each head has two learned parameters: alpha_pos[h], alpha_neg[h].
@@ -163,36 +163,21 @@ class CustomMultiHeadAttention(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model)
 
         self.dropout = nn.Dropout(dropout)
-
-        # Scale factor for dot-product
         self.scale = self.head_dim ** -0.5
 
-        # Two learnable bias parameters per head:
-        # alpha_pos[h] applies to (frac_j - frac_i) > 0
-        # alpha_neg[h] applies to (frac_j - frac_i) < 0
-        self.alpha_pos = nn.Parameter(torch.zeros(nhead))
-        self.alpha_neg = nn.Parameter(torch.zeros(nhead))
+        # Two learnable bias parameters per head
+        self.alpha_pos = nn.Parameter(torch.zeros(nhead))  # shape [nhead]
+        self.alpha_neg = nn.Parameter(torch.zeros(nhead))  # shape [nhead]
 
     def forward(
         self,
         query,              # [B, T, d_model]
         key,                # [B, T, d_model]
         value,              # [B, T, d_model]
-        frac,               # [B, T] - stoichiometric fractions
-        key_padding_mask=None,  # [B, T] True means "ignore"
-        attn_mask=None          # optional attn mask [T, T] or [B, T, T]
+        frac,               # [B, T], stoichiometric fractions
+        key_padding_mask=None,  # [B, T] (True means ignore)
+        attn_mask=None          # [T, T] or [B, T, T]
     ):
-        """
-        Args:
-            query: [B, T, d_model]
-            key:   [B, T, d_model]
-            value: [B, T, d_model]
-            frac:  [B, T] stoichiometric fractions for each element in the batch
-            key_padding_mask: [B, T] (True = masked out)
-            attn_mask: optional [T, T] or [B, T, T]
-        Returns:
-            out: [B, T, d_model]
-        """
         B, T, _ = query.shape
 
         # 1) Project Q, K, V
@@ -201,66 +186,54 @@ class CustomMultiHeadAttention(nn.Module):
         V = self.W_v(value)  # [B, T, d_model]
 
         # 2) Reshape to [B, nhead, T, head_dim]
-        Q = Q.view(B, T, self.nhead, self.head_dim).transpose(1, 2)  # -> [B, nhead, T, head_dim]
+        Q = Q.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
         K = K.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
         V = V.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
 
-        # 3) Compute scaled dot-product attention logits
-        # shape = [B, nhead, T, T]
+        # 3) Dot-product attention logits => [B, nhead, T, T]
         attn_weights = torch.matmul(Q, K.transpose(-1, -2)) * self.scale
 
-        # 4) Compute stoichiometric difference
-        # D[b, i, j] = frac[b, j] - frac[b, i]
-        # shape => [B, T, T]
-        frac_i = frac.unsqueeze(2)  # [B, T, 1]
-        frac_j = frac.unsqueeze(1)  # [B, 1, T]
-        D = frac_j - frac_i         # [B, T, T]
+        # 4) Stoichiometric difference => frac_j - frac_i
+        frac_i = frac.unsqueeze(-1)  # => [B, T, 1]
+        frac_j = frac.unsqueeze(1)   # => [B, 1, T]
+        D = frac_j - frac_i          # => [B, T, T]
 
         # Positive part & negative part
-        # D_pos = relu(D), D_neg = negative values of D
-        D_pos = torch.relu(D)            # [B, T, T]
-        D_neg = -torch.relu(-D)          # [B, T, T]
+        D_pos = F.relu(D)           
+        D_neg = -F.relu(-D)         
 
-        # 5) Expand for nheads
-        # alpha_pos, alpha_neg => shape [nhead]
-        # We want [B, nhead, T, T], so do:
-        alpha_pos = self.alpha_pos.view(1, self.nhead, 1, 1)  # [1, nhead, 1, 1]
-        alpha_neg = self.alpha_neg.view(1, self.nhead, 1, 1)  # [1, nhead, 1, 1]
+        # Expand for nheads
+        alpha_pos = self.alpha_pos.view(1, self.nhead, 1, 1)  # => [1, nhead, 1, 1]
+        alpha_neg = self.alpha_neg.view(1, self.nhead, 1, 1)  
+        D_pos_exp = D_pos.unsqueeze(1)  # => [B, 1, T, T]
+        D_neg_exp = D_neg.unsqueeze(1)  # => [B, 1, T, T]
 
-        D_pos_exp = D_pos.unsqueeze(1)  # [B, 1, T, T]
-        D_neg_exp = D_neg.unsqueeze(1)  # [B, 1, T, T]
-
-        # stoich_bias shape => [B, nhead, T, T]
+        # Add stoich bias
         stoich_bias = alpha_pos * D_pos_exp + alpha_neg * D_neg_exp
-
-        # 6) Add stoichiometry bias to attention logits
         attn_weights = attn_weights + stoich_bias
 
-        # 7) Apply optional masks
-        # attn_mask: shape [T, T] or [B, T, T]
+        # 5) Masks
         if attn_mask is not None:
             attn_weights = attn_weights + attn_mask
 
-        # key_padding_mask shape = [B, T], True means ignore
         if key_padding_mask is not None:
-            expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, T]
+            expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
             attn_weights = attn_weights.masked_fill(expanded_mask, float('-inf'))
 
-        # 8) Softmax and dropout
-        attn_probs = F.softmax(attn_weights, dim=-1)  # [B, nhead, T, T]
+        # 6) Softmax
+        attn_probs = F.softmax(attn_weights, dim=-1)
         attn_probs = self.dropout(attn_probs)
 
-        # 9) Gather attention outputs
-        out = torch.matmul(attn_probs, V)  # [B, nhead, T, head_dim]
+        # 7) Weighted sum of V
+        out = torch.matmul(attn_probs, V)  # => [B, nhead, T, head_dim]
 
-        # 10) Reshape back to [B, T, d_model]
+        # 8) Reshape => [B, T, d_model]
         out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
 
-        # 11) Final linear projection
+        # 9) Final projection
         out = self.out_proj(out)
-
         return out
-
+        
 class MoEFeedForwardTop2(nn.Module):
     """
     MoE feed-forward module with top-2 gating and optional gating noise.
@@ -272,14 +245,6 @@ class MoEFeedForwardTop2(nn.Module):
                  dropout=0.1, 
                  num_experts=4, 
                  gating_noise=0.0):
-        """
-        Args:
-            d_model (int): Model embedding dimension.
-            dim_feedforward (int): Hidden size in each expert's FFN.
-            dropout (float): Dropout probability.
-            num_experts (int): Number of parallel experts.
-            gating_noise (float): Standard deviation for gating noise; 0.0 = no noise.
-        """
         super().__init__()
         self.num_experts = num_experts
         self.gating_noise = gating_noise
@@ -287,7 +252,7 @@ class MoEFeedForwardTop2(nn.Module):
         # Gating network: from d_model -> num_experts
         self.gate = nn.Linear(d_model, num_experts)
 
-        # Experts: each is a small feed-forward block (d_model -> dim_feedforward -> d_model)
+        # Experts
         self.experts = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(d_model, dim_feedforward),
@@ -302,53 +267,39 @@ class MoEFeedForwardTop2(nn.Module):
     def forward(self, x):
         """
         x: [B, T, d_model]
-        Returns:
-            out: [B, T, d_model]
         """
         B, T, d = x.shape
+        # 1) Gating logits
+        gating_logits = self.gate(x)  # => [B, T, num_experts]
 
-        # 1) Compute gating logits
-        gating_logits = self.gate(x)  # [B, T, num_experts]
-
-        # 2) Inject gating noise (only during training, often)
+        # 2) Noise
         if self.training and self.gating_noise > 0.0:
             noise = torch.randn_like(gating_logits) * self.gating_noise
             gating_logits = gating_logits + noise
 
-        # 3) Softmax over experts
-        gating_scores = F.softmax(gating_logits, dim=-1)  # [B, T, num_experts]
+        # 3) Softmax
+        gating_scores = F.softmax(gating_logits, dim=-1)
 
         # 4) Top-2 gating
         top2_scores, top2_experts = gating_scores.topk(2, dim=-1)  
-        # top2_scores:   [B, T, 2] (the gating probabilities for the top 2 experts)
-        # top2_experts:  [B, T, 2] (the expert indices)
-
-        # 5) Initialize output buffer
         out = torch.zeros_like(x)
 
-        # 6) For each of the two selected experts, gather tokens, forward them, and add weighted output
         for rank in range(2):
-            # expert indices for this rank
-            expert_idx = top2_experts[..., rank]    # [B, T]
-            # gating weights for this rank
-            gating_weight = top2_scores[..., rank]  # [B, T]
+            expert_idx = top2_experts[..., rank]   
+            gating_weight = top2_scores[..., rank]  
 
             for e_idx in range(self.num_experts):
-                mask = (expert_idx == e_idx)  # [B, T] bool
+                mask = (expert_idx == e_idx)  
                 if mask.any():
-                    selected_x = x[mask]  # shape [N, d_model]
-                    expert_out = self.experts[e_idx](selected_x)  # [N, d_model]
-
-                    # Multiply by gating weight
-                    weight = gating_weight[mask].unsqueeze(-1)  # [N, 1]
+                    selected_x = x[mask]          # shape [N, d]
+                    expert_out = self.experts[e_idx](selected_x) 
+                    weight = gating_weight[mask].unsqueeze(-1)
                     weighted_out = weight * expert_out
-
-                    # Scatter back to the output buffer
                     out[mask] += weighted_out
-
         return out
 
-class CustomTransformerEncoderMoELayer(nn.Module):
+
+class CustomTransformerEncoderMoELayerStoich(nn.Module):
     def __init__(self, 
                  d_model, 
                  nhead,
@@ -358,10 +309,8 @@ class CustomTransformerEncoderMoELayer(nn.Module):
                  num_experts=4,
                  gating_noise=0.0):
         super().__init__()
-        # Self-attention block
-        self.self_attn = CustomMultiHeadAttention(d_model, nhead, dropout=dropout)
+        self.self_attn = CustomMultiHeadAttentionStoich(d_model, nhead, dropout=dropout)
 
-        # MoE feed-forward with top-2 gating + gating noise
         self.feed_forward = MoEFeedForwardTop2(
             d_model=d_model,
             dim_feedforward=dim_feedforward,
@@ -370,24 +319,26 @@ class CustomTransformerEncoderMoELayer(nn.Module):
             gating_noise=gating_noise
         )
 
-        # Layer norms
+        # Norms
         self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
         self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
-
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
-    def forward(self, src, src_mask=None, src_key_padding_mask=None):
-        # 1) Self-attention
+    def forward(self, src, frac, src_mask=None, src_key_padding_mask=None):
+        # Stoich-based self-attention
         attn_out = self.self_attn(
-            src, src, src,
+            query=src,
+            key=src,
+            value=src,
+            frac=frac,
             key_padding_mask=src_key_padding_mask,
             attn_mask=src_mask
         )
         src = src + self.dropout1(attn_out)
         src = self.norm1(src)
 
-        # 2) MoE feed-forward
+        # MoE feed-forward
         ff_out = self.feed_forward(src)
         src = src + self.dropout2(ff_out)
         src = self.norm2(src)
@@ -395,20 +346,20 @@ class CustomTransformerEncoderMoELayer(nn.Module):
         return src
 
 
-
-class CustomTransformerEncoderMoE(nn.Module):
+class CustomTransformerEncoderMoEStoich(nn.Module):
     def __init__(self, encoder_layer, num_layers):
         super().__init__()
         self.layers = nn.ModuleList([encoder_layer for _ in range(num_layers)])
-        # We omit final LayerNorm for simplicity
+        # no final LayerNorm for simplicity
 
-    def forward(self, src, mask=None, src_key_padding_mask=None):
-        output = src
+    def forward(self, src, frac, mask=None, src_key_padding_mask=None):
+        out = src
         for layer in self.layers:
-            output = layer(output,
-                           src_mask=mask,
-                           src_key_padding_mask=src_key_padding_mask)
-        return output
+            out = layer(out, frac=frac,
+                        src_mask=mask,
+                        src_key_padding_mask=src_key_padding_mask)
+        return out
+
 
 
 import pandas as pd
@@ -425,13 +376,14 @@ import torch.nn as nn
 # Reuse the same fraction encoders, embedder, etc. from your original code
 # Reuse the same CustomMultiHeadAttention from your previous custom attention code
 
-class EncoderMoE(nn.Module):
+class EncoderMoEStoichNoFracEnc(nn.Module):
+    """
+    Stoich-based Encoder with MoE, but WITHOUT the old fractional encoder logic.
+    """
     def __init__(self,
                  d_model,
                  N,
                  heads,
-                 frac=False,
-                 attn=True,
                  compute_device=None,
                  num_experts=4,
                  gating_noise=0.0):
@@ -439,61 +391,47 @@ class EncoderMoE(nn.Module):
         self.d_model = d_model
         self.N = N
         self.heads = heads
-        self.fractional = frac
-        self.attention = attn
         self.compute_device = compute_device
 
-        # same embedder, fraction encoders
-        self.embed = Embedder(d_model=self.d_model,
-                              compute_device=self.compute_device)
-        self.pe = FractionalEncoder(self.d_model, resolution=5000, log10=False)
-        self.ple = FractionalEncoder(self.d_model, resolution=5000, log10=True)
+        # We still embed the element indices => [B, T, d_model]
+        self.embed = Embedder(d_model=self.d_model, compute_device=self.compute_device)
 
-        self.emb_scaler = nn.parameter.Parameter(torch.tensor([1.]))
-        self.pos_scaler = nn.parameter.Parameter(torch.tensor([1.]))
-        self.pos_scaler_log = nn.parameter.Parameter(torch.tensor([1.]))
-
-        if self.attention:
-            encoder_layer = CustomTransformerEncoderMoELayer(
-                d_model=self.d_model,
-                nhead=self.heads,
-                dim_feedforward=2048,
-                dropout=0.1,
-                layer_norm_eps=1e-5,
-                num_experts=num_experts,
-                gating_noise=gating_noise
-            )
-            self.transformer_encoder = CustomTransformerEncoderMoE(
-                encoder_layer=encoder_layer,
-                num_layers=self.N
-            )
+        # Build the stoich-based Transformer
+        encoder_layer = CustomTransformerEncoderMoELayerStoich(
+            d_model=self.d_model,
+            nhead=self.heads,
+            dim_feedforward=2048,
+            dropout=0.1,
+            layer_norm_eps=1e-5,
+            num_experts=num_experts,
+            gating_noise=gating_noise
+        )
+        self.transformer_encoder = CustomTransformerEncoderMoEStoich(
+            encoder_layer=encoder_layer,
+            num_layers=self.N
+        )
 
     def forward(self, src, frac):
-        print(f'frac {frac}')
-        x = self.embed(src) * 2**self.emb_scaler
+        """
+        src: [B, T], element indices
+        frac: [B, T], stoichiometric fractions
+        """
+        # 1) Basic element embedding
+        x = self.embed(src)  # => [B, T, d_model]
 
-        src_key_padding_mask = (frac == 0)
-        pe = torch.zeros_like(x)
-        ple = torch.zeros_like(x)
-        pe_scaler = 2**((1 - self.pos_scaler)**2)
-        ple_scaler = 2**((1 - self.pos_scaler_log)**2)
-        pe[:, :, :self.d_model//2] = self.pe(frac) * pe_scaler
-        ple[:, :, self.d_model//2:] = self.ple(frac) * ple_scaler
+        # 2) Key padding mask => True for padded positions
+        src_key_padding_mask = (src == 0)
 
-        if self.attention:
-            x_src = x + pe + ple
-            x = self.transformer_encoder(
-                x_src,
-                mask=None,
-                src_key_padding_mask=src_key_padding_mask
-            )
+        # 3) Pass to stoich-based transformer
+        #    The stoich attention will do frac_j - frac_i
+        out = self.transformer_encoder(
+            x, frac=frac,
+            mask=None,
+            src_key_padding_mask=src_key_padding_mask
+        )
 
-        if self.fractional:
-            x = x * frac.unsqueeze(2).repeat(1, 1, self.d_model)
+        return out
 
-        hmask = (frac == 0).unsqueeze(-1).repeat(1, 1, self.d_model)
-        x = x.masked_fill(hmask, 0)
-        return x
 
 
 class Madani(nn.Module):
@@ -514,7 +452,8 @@ class Madani(nn.Module):
         self.heads = heads
         self.compute_device = compute_device
 
-        self.encoder = EncoderMoE(
+        # This uses no fractional encoding
+        self.encoder = EncoderMoEStoichNoFracEnc(
             d_model=self.d_model,
             N=self.N,
             heads=self.heads,
@@ -523,6 +462,7 @@ class Madani(nn.Module):
             gating_noise=gating_noise
         )
 
+        # The existing residual MLP
         if residual_nn == 'roost':
             self.out_hidden = [1024, 512, 256, 128]
             self.output_nn = ResidualNetwork(self.d_model, self.out_dims, self.out_hidden)
@@ -531,23 +471,29 @@ class Madani(nn.Module):
             self.output_nn = ResidualNetwork(self.d_model, self.out_dims, self.out_hidden)
 
     def forward(self, src, frac):
-        output = self.encoder(src, frac)
+        """
+        src: [B, T] element indices
+        frac: [B, T] stoichiometric fractions
+        """
+        # Pass to the stoich-based encoder
+        output = self.encoder(src, frac)   # => [B, T, d_model]
+
+        # Build a mask for final output if needed
         mask = (src == 0).unsqueeze(-1).repeat(1, 1, self.out_dims)
         output = self.output_nn(output)
 
+        # If you do averaging or chunking:
         if self.avg:
             output = output.masked_fill(mask, 0)
+            # average over T dimension
             output = output.sum(dim=1) / (~mask).sum(dim=1)
+            # split into final predictions + logits if you like
             output, logits = output.chunk(2, dim=-1)
             probability = torch.ones_like(output)
             probability[:, :logits.shape[-1]] = torch.sigmoid(logits)
             output = output * probability
 
         return output
-
-
-
-
 # %%
 if __name__ == '__main__':
     model = Madani()
