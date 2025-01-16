@@ -334,12 +334,13 @@ class CustomTransformerEncoderMoELayerStoich(nn.Module):
                  dropout=0.1,
                  layer_norm_eps=1e-5,
                  num_experts=4,
-                 gating_noise=0.0):
+                 gating_noise=0.0,
+                 add_frac_bias=False):
         super().__init__()
         
         # Stoich-based multi-head attention
         self.self_attn = CustomMultiHeadAttentionStoich(d_model, nhead, dropout=dropout)
-
+        self.add_frac_bias = add_frac_bias
         # MoE feed-forward
         self.feed_forward = MoEFeedForwardTop2(
             d_model=d_model,
@@ -384,10 +385,16 @@ class CustomTransformerEncoderMoELayerStoich(nn.Module):
         # -----------------------------------------------------------------------
         # (B) Compute an extra fraction-based bias to add into the residual
         # -----------------------------------------------------------------------
-        stoich_bias = self.compute_stoich_bias(frac)  # [B, T, d_model]
+        if self.add_frac_bias:
+            stoich_bias = self.compute_stoich_bias(frac)  # [B, T, d_model]
+        
+            
 
         # 2) Residual connection = src + attn_out + stoich_bias
-        src = src + attn_out + stoich_bias
+        
+            src = src + attn_out + stoich_bias
+        else:
+            src = src + attn_out
         src = self.norm1(src)
 
         # 3) MoE feed-forward
@@ -421,11 +428,13 @@ class CustomTransformerEncoderMoEStoich(nn.Module):
 
     def forward(self, src, frac, mask=None, src_key_padding_mask=None):
         out = src
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
+            add_bias = (i==0)
             out = layer(
                 out, frac=frac,
                 src_mask=mask,
-                src_key_padding_mask=src_key_padding_mask
+                src_key_padding_mask=src_key_padding_mask,
+                add_frac_bias=add_bias
             )
         return out
 
