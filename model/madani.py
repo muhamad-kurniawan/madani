@@ -176,7 +176,7 @@ class CustomMultiHeadAttentionStoich(nn.Module):
 
         # Weighted mix parameters
         self.gamma = nn.Parameter(torch.tensor(1.0))  # scale for QK^T
-        self.delta = nn.Parameter(torch.tensor(1.0))  # scale for stoich_bias
+        self.delta = nn.Parameter(torch.tensor(0.5))  # scale for stoich_bias
 
     def forward(
         self,
@@ -215,7 +215,7 @@ class CustomMultiHeadAttentionStoich(nn.Module):
         D = frac_j - frac_i
 
         # -- CLAMP D here:
-        D = torch.clamp(D, min=self.clamp_min, max=self.clamp_max)
+        # D = torch.clamp(D, min=self.clamp_min, max=self.clamp_max)
 
         # 5) Positive & negative parts => [B, T, T]
         D_pos = F.relu(D)           # zero out negatives
