@@ -169,7 +169,7 @@ class CustomMultiHeadAttentionStoich(nn.Module):
 
         # Weighted mix parameters for final combination
         self.gamma = nn.Parameter(torch.tensor(1.0))
-        self.delta = nn.Parameter(torch.tensor(1.0))
+        self.delta = nn.Parameter(torch.tensor(0.2))
 
     def forward(
         self,
