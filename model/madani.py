@@ -474,9 +474,37 @@ class EncoderMoE(nn.Module):
             )
 
     def forward(self, src, frac):
-        # ...
-        # (same as before)
-        # ...
+        """
+        src: [B, T] with element indices
+        frac: [B, T] stoichiometric fractions
+        """
+        print(f'frac {frac}')
+        x = self.embed(src) * 2**self.emb_scaler
+
+        src_key_padding_mask = (frac == 0)
+        pe = torch.zeros_like(x)
+        ple = torch.zeros_like(x)
+
+        pe_scaler = 2**((1 - self.pos_scaler)**2)
+        ple_scaler = 2**((1 - self.pos_scaler_log)**2)
+        pe[:, :, :self.d_model//2] = self.pe(frac) * pe_scaler
+        ple[:, :, self.d_model//2:] = self.ple(frac) * ple_scaler
+
+        if self.attention:
+            x_src = x + pe + ple
+            # Now pass frac to the stoich-based encoder
+            x = self.transformer_encoder(
+                x_src,
+                frac=frac,             # <--- pass stoichiometry
+                mask=None,
+                src_key_padding_mask=src_key_padding_mask
+            )
+
+        if self.fractional:
+            x = x * frac.unsqueeze(2).repeat(1, 1, self.d_model)
+
+        hmask = (frac == 0).unsqueeze(-1).repeat(1, 1, self.d_model)
+        x = x.masked_fill(hmask, 0)
         return x
 
 
