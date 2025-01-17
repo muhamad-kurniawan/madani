@@ -506,22 +506,22 @@ class EncoderMoEStoich(nn.Module):
         self.pos_scaler = nn.parameter.Parameter(torch.tensor([1.]))
         self.pos_scaler_log = nn.parameter.Parameter(torch.tensor([1.]))
 
-    if self.attention:
-        # Use the *Stoich + RoPE* versions of layer + encoder
-        encoder_layer = CustomTransformerEncoderMoELayerStoich(
-            d_model=self.d_model,
-            nhead=self.heads,
-            dim_feedforward=2048,
-            dropout=0.1,
-            layer_norm_eps=1e-5,
-            num_experts=num_experts,
-            gating_noise=gating_noise,
-            max_seq_len=5000,  # or something suitable
-        )
-        self.transformer_encoder = CustomTransformerEncoderMoEStoich(
-            encoder_layer=encoder_layer,
-            num_layers=self.N
-        )
+        if self.attention:
+            # Use the *Stoich + RoPE* versions of layer + encoder
+            encoder_layer = CustomTransformerEncoderMoELayerStoich(
+                d_model=self.d_model,
+                nhead=self.heads,
+                dim_feedforward=2048,
+                dropout=0.1,
+                layer_norm_eps=1e-5,
+                num_experts=num_experts,
+                gating_noise=gating_noise,
+                max_seq_len=5000,  # or something suitable
+            )
+            self.transformer_encoder = CustomTransformerEncoderMoEStoich(
+                encoder_layer=encoder_layer,
+                num_layers=self.N
+            )
 
 
     def forward(self, src, frac):
