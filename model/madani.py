@@ -207,6 +207,7 @@ class CustomMultiHeadAttentionStoich(nn.Module):
         frac_i = frac.unsqueeze(-1)  # => [B, T, 1]
         frac_j = frac.unsqueeze(1)   # => [B, 1, T]
         D = (frac_j - frac_i)/(frac_i*frac_j)          # => [B, T, T]
+        print('D : ',{D})
 
         # Positive & negative split
         D_pos = F.relu(D)      # zero out negatives
