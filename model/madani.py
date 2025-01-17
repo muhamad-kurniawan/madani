@@ -460,25 +460,6 @@ class CustomTransformerEncoderMoEStoich(nn.Module):
             output = layer(output, frac=frac,
                            src_mask=mask,
                            src_key_padding_mask=src_key_padding_mask)
-        return outputclass CustomTransformerEncoderMoEStoich(nn.Module):
-    def __init__(self, encoder_layer, num_layers):
-        super().__init__()
-        self.layers = nn.ModuleList([encoder_layer for _ in range(num_layers)])
-        # Omit final LayerNorm for simplicity
-
-    def forward(self, src, frac, mask=None, src_key_padding_mask=None):
-        """
-        Args:
-            src: [B, T, d_model]
-            frac: [B, T]
-            mask: optional attn mask
-            src_key_padding_mask: [B, T]
-        """
-        output = src
-        for layer in self.layers:
-            output = layer(output, frac=frac,
-                           src_mask=mask,
-                           src_key_padding_mask=src_key_padding_mask)
         return output
 
 
