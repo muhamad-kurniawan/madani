@@ -206,7 +206,8 @@ class CustomMultiHeadAttentionStoich(nn.Module):
         # 4) Stoichiometric difference => D = frac_j - frac_i => [B, T, T]
         frac_i = frac.unsqueeze(-1)  # => [B, T, 1]
         frac_j = frac.unsqueeze(1)   # => [B, 1, T]
-        D = (frac_j - frac_i)/(frac_i*frac_j)          # => [B, T, T]
+        D = (frac_j - frac_i)          # => [B, T, T]
+        # D = (frac_j - frac_i)/(frac_i*frac_j) 
         print('frac_j : ',{frac_j})
         print('frac_i : ',{frac_i})
         print('D : ',{D})
