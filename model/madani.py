@@ -208,6 +208,7 @@ class CustomMultiHeadAttentionStoich(nn.Module):
         frac_j = frac.unsqueeze(1)   # => [B, 1, T]
         D = (frac_j - frac_i)/(frac_i*frac_j)          # => [B, T, T]
         print('frac_j : ',{frac_j})
+        print('frac_i : ',{frac_i})
         print('D : ',{D})
 
         # Positive & negative split
