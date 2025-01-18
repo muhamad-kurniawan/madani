@@ -130,69 +130,43 @@ class FractionalEncoder(nn.Module):
 
         return out
 
-def build_stoich_rope_angles(fraction, head_dim, base=10000.0, scale=1000.0):
+def build_rope_frequencies(max_seq_len, head_dim, base=10000.0):
     """
-    fraction: [B, T] with values in [0,1], possibly with some zeros for padding.
-    head_dim: e.g., 64 if d_model=512 and nhead=8.
-    base:     the base for the RoPE denominator, commonly 10000.0
-    scale:    how large you want to treat 'fraction' (like 'position')
-
-    Returns angles: [B, T, head_dim/2].
-    We typically do angles[b,t,i] = ( fraction[b,t]*scale ) / base^(2*i/head_dim).
+    Create a [max_seq_len, head_dim/2] Tensor of rotation angles for RoPE.
     """
     assert head_dim % 2 == 0, "head_dim must be even for RoPE."
     half_dim = head_dim // 2
 
-    B, T = fraction.shape
-    # positions ~ fraction * scale
-    positions = fraction * scale  # shape [B, T]
+    positions = torch.arange(max_seq_len, dtype=torch.float32)  # [0..max_seq_len-1]
+    idx = torch.arange(half_dim, dtype=torch.float32)
+    # denominator = base^(2*i/head_dim)
+    freq_div = base ** (2 * idx / head_dim)  # shape [half_dim]
 
-    # freq_div shape => [half_dim]
-    i_idx = torch.arange(half_dim, device=fraction.device, dtype=fraction.dtype)
-    freq_div = base**(2 * i_idx / float(head_dim))  # shape [half_dim]
-
-    # angles => shape [B, T, half_dim]
-    # angles[b,t,i] = positions[b,t] / freq_div[i]
-    # We'll expand freq_div to [1,1,half_dim]
-    angles = positions.unsqueeze(-1) / freq_div.view(1, 1, half_dim)
-    return angles
+    # rope_freq => shape [max_seq_len, half_dim]
+    rope_freq = positions.unsqueeze(-1) / freq_div.unsqueeze(0)
+    return rope_freq
 
 
-
-def rope_spiral_stoich(x, angles, fraction, radial_scale=1.0):
+def rope_rotate(x, rope_freq):
     """
-    x:        [B, nhead, T, head_dim]
-    angles:   [B, T, half_dim] (fraction-based angles, as before)
-    fraction: [B, T] stoichiometric fraction, used for radius
-    radial_scale: multiply fraction by this to get radius
-
-    Returns x_rot with shape [B, nhead, T, head_dim].
+    Apply RoPE to x.  x: [B, nhead, T, head_dim]
+    rope_freq: [T, head_dim/2] of angles (theta).
     """
     B, nhead, T, d = x.shape
     half = d // 2
 
-    # 1) Split x into two halves
-    x_left  = x[..., :half]   # [B, nhead, T, half]
-    x_right = x[..., half:]   # [B, nhead, T, half]
+    x_left = x[..., :half]     # [B, nhead, T, half]
+    x_right = x[..., half:]    # [B, nhead, T, half]
 
-    # 2) Expand angles => cos, sin
-    freq_cos = torch.cos(angles).unsqueeze(1)  # => [B, 1, T, half]
-    freq_sin = torch.sin(angles).unsqueeze(1)  # => [B, 1, T, half]
+    # rope_freq => shape [T, half], broadcast to [1, 1, T, half]
+    freq_cos = torch.cos(rope_freq).unsqueeze(0).unsqueeze(0)  # [1, 1, T, half]
+    freq_sin = torch.sin(rope_freq).unsqueeze(0).unsqueeze(0)  # [1, 1, T, half]
 
-    # 3) Standard RoPE rotation
+    # Standard RoPE mix
     x_rot_left  = x_left  * freq_cos - x_right * freq_sin
     x_rot_right = x_left  * freq_sin + x_right * freq_cos
 
-    # 4) "Spiral" step: multiply by a radius r = fraction * radial_scale
-    #    fraction shape => [B, T], expand to [B, 1, T, 1]
-    radius = (fraction * radial_scale).unsqueeze(1).unsqueeze(-1)  # => [B, 1, T, 1]
-
-    x_rot_left  = x_rot_left  * radius
-    x_rot_right = x_rot_right * radius
-
-    # 5) Recombine
-    return torch.cat([x_rot_left, x_rot_right], dim=-1)
-
+    return torch.cat([x_rot_left, x_rot_right], dim=-1)  # [B, nhead, T, d]
 
 import torch
 import torch.nn as nn
@@ -202,97 +176,84 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import torch.nn.functional as F
-
-import torch.nn.functional as F
-
-import torch.nn.functional as F
-
-class CustomMultiHeadAttentionStoichSpiral(nn.Module):
-    """
-    Fraction-based "Spiral" RoPE: we rotate Q/K by angles derived
-    from stoichiometric fraction, AND multiply by a "radius" that
-    depends on fraction.
-    """
-    def __init__(self, d_model, nhead, dropout=0.1,
-                 base=10000.0,
-                 angle_scale=1000.0,
-                 radial_scale=1.0):
-        """
-        Args:
-          base, angle_scale: same usage as before for angles.
-          radial_scale: a factor to multiply the fraction to get radius,
-                        e.g. radius = fraction * radial_scale
-        """
+class CustomMultiHeadAttention(nn.Module):
+    def __init__(self, d_model, nhead, dropout=0.1, max_seq_len=4096):
         super().__init__()
-        assert d_model % nhead == 0
+        assert d_model % nhead == 0, "d_model must be divisible by nhead"
         self.d_model = d_model
         self.nhead = nhead
         self.head_dim = d_model // nhead
-        self.dropout = nn.Dropout(dropout)
 
-        # Q, K, V, out
+        # Linear layers for Q, K, V
         self.W_q = nn.Linear(d_model, d_model)
         self.W_k = nn.Linear(d_model, d_model)
         self.W_v = nn.Linear(d_model, d_model)
+
+        # Output projection
         self.out_proj = nn.Linear(d_model, d_model)
 
-        self.scale_factor = (self.head_dim**-0.5)
-        self.base = base
-        self.angle_scale = angle_scale  # how we scale fraction -> angle
-        self.radial_scale = radial_scale  # how we scale fraction -> radius
+        self.dropout = nn.Dropout(dropout)
 
-    def forward(self,
-                x,     # [B, T, d_model]
-                frac,  # [B, T], stoichiometric fraction
-                key_padding_mask=None,
-                attn_mask=None):
-        B, T, _ = x.shape
+        # Scaled factor for dot-product attention
+        self.scale = self.head_dim**-0.5
 
-        # 1) Q, K, V
-        Q = self.W_q(x)
-        K = self.W_k(x)
-        V = self.W_v(x)
+        # --- RoPE additions ---
+        # Precompute rope frequencies for up to 'max_seq_len'
+        rope_buf = build_rope_frequencies(max_seq_len, self.head_dim)
+        # Register as a buffer so it moves to the correct device automatically
+        self.register_buffer("rope_freq", rope_buf, persistent=False)
+        self.max_seq_len = max_seq_len
 
-        # 2) Reshape => [B, nhead, T, head_dim]
-        Q = Q.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
+    def forward(
+        self,
+        query,              # [B, T, d_model]
+        key,                # [B, T, d_model]
+        value,              # [B, T, d_model]
+        key_padding_mask=None,  # [B, T] mask where True indicates padding
+        attn_mask=None          # optional attn mask [T, T] or [B, T, T]
+    ):
+        B, T, _ = query.shape
+        # 1) Project Q, K, V
+        Q = self.W_q(query)  # [B, T, d_model]
+        K = self.W_k(key)    # [B, T, d_model]
+        V = self.W_v(value)  # [B, T, d_model]
+
+        # 2) Reshape to [B, nhead, T, head_dim]
+        Q = Q.view(B, T, self.nhead, self.head_dim).transpose(1, 2)  # [B, nhead, T, head_dim]
         K = K.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
         V = V.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
 
-        # 3) Build fraction-based angles => shape [B, T, half_dim]
-        angles = build_stoich_rope_angles(
-            fraction=frac,
-            head_dim=self.head_dim,
-            base=self.base,
-            scale=self.angle_scale
-        )
+        # --- RoPE step: rotate Q, K for the positions 0..T-1 ---
+        # slice the rope frequencies for T
+        cur_rope_freq = self.rope_freq[:T]  # [T, head_dim/2]
+        Q = rope_rotate(Q, cur_rope_freq)   # [B, nhead, T, head_dim]
+        K = rope_rotate(K, cur_rope_freq)
 
-        # 4) Rotate + radial scale for Q, K
-        Q = rope_spiral_stoich(Q, angles, frac, radial_scale=self.radial_scale)
-        K = rope_spiral_stoich(K, angles, frac, radial_scale=self.radial_scale)
+        # 3) Dot-product attention
+        attn_weights = torch.matmul(Q, K.transpose(-1, -2)) * self.scale
+        # attn_weights shape = [B, nhead, T_q, T_k]
 
-        # 5) Dot-product attention
-        attn_weights = torch.matmul(Q, K.transpose(-1, -2)) * self.scale_factor
-
+        # If attn_mask is provided
         if attn_mask is not None:
-            attn_weights = attn_weights + attn_mask
+            attn_weights = attn_weights + attn_mask  # shape must broadcast
+
+        # If key_padding_mask is provided
         if key_padding_mask is not None:
-            expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
+            expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, T_k]
             attn_weights = attn_weights.masked_fill(expanded_mask, float('-inf'))
 
         attn_probs = F.softmax(attn_weights, dim=-1)
         attn_probs = self.dropout(attn_probs)
 
-        # 6) Weighted sum
+        # 4) Weighted sum of V
         out = torch.matmul(attn_probs, V)  # [B, nhead, T, head_dim]
 
-        # 7) Reshape => [B, T, d_model]
+        # 5) Reshape back to [B, T, d_model]
         out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
 
-        # 8) Final projection
+        # 6) Final linear projection
         out = self.out_proj(out)
         return out
-
 
 
 class MoEFeedForwardTop2(nn.Module):
@@ -391,20 +352,12 @@ class CustomTransformerEncoderMoELayer(nn.Module):
                  layer_norm_eps=1e-5,
                  num_experts=4,
                  gating_noise=0.0,
-                 rope_base=10000.0,
-                 rope_scale=1000.0):
+                 max_seq_len=4096):
         super().__init__()
-        # Replace old attention with StoichRoPE
-        self.self_attn = CustomMultiHeadAttentionStoichSpiral(
-            d_model,
-            nhead,
-            dropout=dropout,
-            base=rope_base,
-            angle_scale=rope_scale,   # same as before
-            radial_scale=10.0         # or whatever scale you want for radius
-        )
+        # Use the RoPE-enabled Multi-head attention
+        self.self_attn = CustomMultiHeadAttention(d_model, nhead, dropout=dropout, max_seq_len=max_seq_len)
 
-
+        # MoE feed-forward with top-2 gating
         self.feed_forward = MoEFeedForwardTop2(
             d_model=d_model,
             dim_feedforward=dim_feedforward,
@@ -413,16 +366,17 @@ class CustomTransformerEncoderMoELayer(nn.Module):
             gating_noise=gating_noise
         )
 
+        # Layer norms, etc. remain unchanged
         self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
         self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
+
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
-    def forward(self, src, frac, src_mask=None, src_key_padding_mask=None):
-        # 1) StoichRoPE-based attention
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+        # 1) Self-attention with RoPE
         attn_out = self.self_attn(
-            x=src,
-            frac=frac,
+            src, src, src,
             key_padding_mask=src_key_padding_mask,
             attn_mask=src_mask
         )
@@ -433,8 +387,8 @@ class CustomTransformerEncoderMoELayer(nn.Module):
         ff_out = self.feed_forward(src)
         src = src + self.dropout2(ff_out)
         src = self.norm2(src)
-        return src
 
+        return src
 
 
 
@@ -443,16 +397,14 @@ class CustomTransformerEncoderMoE(nn.Module):
     def __init__(self, encoder_layer, num_layers):
         super().__init__()
         self.layers = nn.ModuleList([encoder_layer for _ in range(num_layers)])
+        # We omit final LayerNorm for simplicity
 
-    def forward(self, src, frac, mask=None, src_key_padding_mask=None):
+    def forward(self, src, mask=None, src_key_padding_mask=None):
         output = src
         for layer in self.layers:
-            output = layer(
-                output,
-                frac=frac,  # pass fractions to each layer
-                src_mask=mask,
-                src_key_padding_mask=src_key_padding_mask
-            )
+            output = layer(output,
+                           src_mask=mask,
+                           src_key_padding_mask=src_key_padding_mask)
         return output
 
 
@@ -480,8 +432,7 @@ class EncoderMoE(nn.Module):
                  compute_device=None,
                  num_experts=4,
                  gating_noise=0.0,
-                 rope_base=10000.0,
-                 rope_scale=1000.0):
+                 max_seq_len=4096):  # <--- optionally configure
         super().__init__()
         self.d_model = d_model
         self.N = N
@@ -490,10 +441,14 @@ class EncoderMoE(nn.Module):
         self.attention = attn
         self.compute_device = compute_device
 
-        # Still use your element embedder
+        # same embedder, fraction encoders, etc.
         self.embed = Embedder(d_model=self.d_model, compute_device=self.compute_device)
+        self.pe = FractionalEncoder(self.d_model, resolution=5000, log10=False)
+        self.ple = FractionalEncoder(self.d_model, resolution=5000, log10=True)
 
         self.emb_scaler = nn.parameter.Parameter(torch.tensor([1.]))
+        self.pos_scaler = nn.parameter.Parameter(torch.tensor([1.]))
+        self.pos_scaler_log = nn.parameter.Parameter(torch.tensor([1.]))
 
         if self.attention:
             encoder_layer = CustomTransformerEncoderMoELayer(
@@ -504,8 +459,7 @@ class EncoderMoE(nn.Module):
                 layer_norm_eps=1e-5,
                 num_experts=num_experts,
                 gating_noise=gating_noise,
-                rope_base=rope_base,
-                rope_scale=rope_scale
+                max_seq_len=max_seq_len    # <--- pass here
             )
             self.transformer_encoder = CustomTransformerEncoderMoE(
                 encoder_layer=encoder_layer,
@@ -513,29 +467,31 @@ class EncoderMoE(nn.Module):
             )
 
     def forward(self, src, frac):
+        # same as before
         x = self.embed(src) * 2**self.emb_scaler
 
-        # We'll treat zero fraction as padding
-        src_key_padding_mask = (frac == 0.)
+        src_key_padding_mask = (frac == 0)
+        pe = torch.zeros_like(x)
+        ple = torch.zeros_like(x)
+        pe_scaler = 2**((1 - self.pos_scaler)**2)
+        ple_scaler = 2**((1 - self.pos_scaler_log)**2)
+        pe[:, :, :self.d_model//2] = self.pe(frac) * pe_scaler
+        ple[:, :, self.d_model//2:] = self.ple(frac) * ple_scaler
 
         if self.attention:
+            x_src = x + pe + ple
             x = self.transformer_encoder(
-                src=x,
-                frac=frac,
+                x_src,
                 mask=None,
                 src_key_padding_mask=src_key_padding_mask
             )
 
-        # optional multiply by frac if desired
         if self.fractional:
-            x = x * frac.unsqueeze(2)
+            x = x * frac.unsqueeze(2).repeat(1, 1, self.d_model)
 
-        # zero out
-        hmask = (frac == 0.).unsqueeze(-1)
+        hmask = (frac == 0).unsqueeze(-1).repeat(1, 1, self.d_model)
         x = x.masked_fill(hmask, 0)
         return x
-
-
 
 
 
