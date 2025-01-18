@@ -207,7 +207,7 @@ class CustomMultiHeadAttentionStoich(nn.Module):
         frac_i = frac.unsqueeze(-1)  # => [B, T, 1]
         frac_j = frac.unsqueeze(1)   # => [B, 1, T]
         # D = (frac_j - frac_i)          # => [B, T, T]
-        D = (frac_j - frac_i)/(frac_i*frac_j+ torch.Tensor(1e-6)) 
+        D = (frac_j - frac_i)/(frac_i*frac_j+ 1e-8) 
         print('frac_j : ',{frac_j})
         print('frac_i : ',{frac_i})
         print('D : ',{D})
