@@ -352,6 +352,7 @@ class EncoderConvThenTransformer(nn.Module):
                  layer_norm_eps=1e-5,
                  num_experts=4,
                  gating_noise=0.0,
+                 
                  compute_device=None):
         super().__init__()
         self.compute_device = compute_device
@@ -412,6 +413,7 @@ class Madani(nn.Module):
         self.out_dims = out_dims
         self.d_model = d_model
         self.heads = heads
+        self.N = 4
         self.compute_device = compute_device
 
         # Use our special 2-layer encoder
@@ -420,6 +422,7 @@ class Madani(nn.Module):
             nhead=self.heads,
             dim_feedforward=2048,
             dropout=0.1,
+            N=self.N,
             layer_norm_eps=1e-5,
             num_experts=num_experts,
             gating_noise=gating_noise,
