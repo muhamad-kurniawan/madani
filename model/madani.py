@@ -139,6 +139,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 class CustomMultiHeadAttention(nn.Module):
     def __init__(self, d_model, nhead, dropout=0.1, epsilon=1e-8):
         super().__init__()
@@ -240,7 +244,8 @@ class CustomMultiHeadAttention(nn.Module):
         out = self.out_proj(out)  # [B, T, d_model]
 
         return out
-        
+
+
 class MoEFeedForwardTop2(nn.Module):
     """
     MoE feed-forward module with top-2 gating and optional gating noise.
@@ -392,21 +397,6 @@ class CustomTransformerEncoderMoE(nn.Module):
         return output
 
 
-class CustomTransformerEncoderMoE(nn.Module):
-    def __init__(self, encoder_layer, num_layers):
-        super().__init__()
-        self.layers = nn.ModuleList([encoder_layer for _ in range(num_layers)])
-        # We omit final LayerNorm for simplicity
-
-    def forward(self, src, mask=None, src_key_padding_mask=None):
-        output = src
-        for layer in self.layers:
-            output = layer(output,
-                           src_mask=mask,
-                           src_key_padding_mask=src_key_padding_mask)
-        return output
-
-
 import pandas as pd
 import numpy as np
 import torch
@@ -538,6 +528,8 @@ class Madani(nn.Module):
             output = output * probability
 
         return output
+
+
 
 # %%
 if __name__ == '__main__':
