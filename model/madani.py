@@ -252,7 +252,7 @@ class TwoPhaseConvAttention(nn.Module):
       2) Pairwise 2D conv to produce scalar attention
       3) Weighted sum => output
     """
-    def __init__(self, d_model, hidden_ff=1024, kernel_size_1d=3):
+    def __init__(self, d_model, hidden_ff=256, kernel_size_1d=3):
         super().__init__()
         self.d_model = d_model
 
