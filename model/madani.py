@@ -3,7 +3,7 @@ import pandas as pd
 
 import torch
 from torch import nn
-
+import torch.nn.functional as F
 
 # %%
 RNG_SEED = 42
