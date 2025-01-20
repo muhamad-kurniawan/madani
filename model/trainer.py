@@ -195,10 +195,15 @@ class ModelTrainer:
                 prediction, uncertainty = output.chunk(2, dim=-1)
 
                 # Compute loss and backprop
+                # loss = self.criterion(
+                #     prediction.view(-1),
+                #     uncertainty.view(-1),
+                #     y.view(-1)
+                # )
                 loss = self.criterion(
-                    prediction.view(-1),
-                    uncertainty.view(-1),
-                    y.view(-1)
+                    prediction.reshape(-1),
+                    uncertainty.reshape(-1),
+                    y.reshape(-1)
                 )
                 loss.backward()
                 self.optimizer.step()
