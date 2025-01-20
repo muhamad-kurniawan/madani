@@ -139,13 +139,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class CustomMultiHeadAttentionStoich(nn.Module):
-    """
-    Multi-Head Attention with a learnable bias based on stoichiometric fractions.
-    Specifically:
-        D = (frac_j - frac_i) / (frac_i * frac_j + epsilon)
-        attn_weights = QK^T / sqrt(d_k) + bias * D
-    """
+class CustomMultiHeadAttention(nn.Module):
     def __init__(self, d_model, nhead, dropout=0.1, epsilon=1e-8):
         super().__init__()
         assert d_model % nhead == 0, "d_model must be divisible by nhead"
@@ -163,19 +157,18 @@ class CustomMultiHeadAttentionStoich(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model)
 
         self.dropout = nn.Dropout(dropout)
-        self.scale = self.head_dim ** -0.5
 
-        # Learnable bias parameter (per head)
-        self.bias = nn.Parameter(torch.zeros(nhead))
+        # Bias vector: one bias per head and head_dim
+        self.bias = nn.Parameter(torch.zeros(nhead, self.head_dim))
 
     def forward(
         self,
-        query,               # [B, T, d_model]
-        key,                 # [B, T, d_model]
-        value,               # [B, T, d_model]
-        frac,                # [B, T], stoichiometric fractions
-        key_padding_mask=None,  
-        attn_mask=None
+        query,              # [B, T, d_model]
+        key,                # [B, T, d_model]
+        value,              # [B, T, d_model]
+        frac,               # [B, T]
+        key_padding_mask=None,  # [B, T]
+        attn_mask=None          # [T, T] or [B, T, T]
     ):
         """
         Args:
@@ -196,44 +189,58 @@ class CustomMultiHeadAttentionStoich(nn.Module):
         K = K.view(B, T, self.nhead, self.head_dim).transpose(1, 2)  # [B, nhead, T, head_dim]
         V = V.view(B, T, self.nhead, self.head_dim).transpose(1, 2)  # [B, nhead, T, head_dim]
 
-        # 3) Compute scaled dot-product attention
-        attn_weights = torch.matmul(Q, K.transpose(-1, -2)) * self.scale  # [B, nhead, T, T]
-
-        # 4) Compute D = (frac_j - frac_i) / (frac_i * frac_j + epsilon)
+        # 3) Compute D = (frac_j - frac_i) / (frac_i * frac_j + epsilon)
         frac_i = frac.unsqueeze(-1)  # [B, T, 1]
         frac_j = frac.unsqueeze(1)   # [B, 1, T]
         D = (frac_j - frac_i) / (frac_i * frac_j + self.epsilon)  # [B, T, T]
-
-        # 5) Expand D to match attention heads
         D = D.unsqueeze(1)  # [B, 1, T, T]
 
-        # 6) Expand bias to [1, nhead, 1, 1] and multiply with D
-        bias = self.bias.view(1, self.nhead, 1, 1)  # [1, nhead, 1, 1]
-        attn_weights = attn_weights + bias * D  # [B, nhead, T, T]
+        # 4) Element-wise multiplication between Q and K for each pair (i, j)
+        # Expand Q and K for pairwise multiplication
+        Q_expanded = Q.unsqueeze(3)  # [B, nhead, T, 1, head_dim]
+        K_expanded = K.unsqueeze(2)  # [B, nhead, 1, T, head_dim]
+        QK = Q_expanded * K_expanded   # [B, nhead, T, T, head_dim]
 
-        # 7) Apply masks if provided
+        # 5) Add bias scaled by D
+        # bias: [nhead, head_dim] -> [1, nhead, 1, 1, head_dim]
+        bias = self.bias.view(1, self.nhead, 1, 1, self.head_dim)
+        # D: [B, 1, T, T] -> [B, nhead, T, T, 1]
+        D_expanded = D.unsqueeze(-1)  # [B, 1, T, T, 1]
+        bias_scaled = bias * D_expanded  # [B, nhead, T, T, head_dim]
+
+        # Add bias_scaled to QK
+        QK = QK + bias_scaled  # [B, nhead, T, T, head_dim]
+
+        # 6) Sum over head_dim to get attention weights
+        attn_weights = QK.sum(-1)  # [B, nhead, T, T]
+
+        # 7) Apply scaling
+        attn_weights = attn_weights * (self.head_dim ** -0.5)  # [B, nhead, T, T]
+
+        # 8) Apply masks if any
         if attn_mask is not None:
-            attn_weights = attn_weights + attn_mask
+            attn_weights = attn_weights + attn_mask  # [B, nhead, T, T] or [T, T]
 
         if key_padding_mask is not None:
-            expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, T]
+            # key_padding_mask: [B, T] -> [B, 1, 1, T]
+            expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
             attn_weights = attn_weights.masked_fill(expanded_mask, float('-inf'))
 
-        # 8) Softmax
+        # 9) Softmax
         attn_probs = F.softmax(attn_weights, dim=-1)  # [B, nhead, T, T]
         attn_probs = self.dropout(attn_probs)
 
-        # 9) Weighted sum of V
+        # 10) Compute attention output
         out = torch.matmul(attn_probs, V)  # [B, nhead, T, head_dim]
 
-        # 10) Reshape back to [B, T, d_model]
+        # 11) Reshape back to [B, T, d_model]
         out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)  # [B, T, d_model]
 
-        # 11) Final linear projection
+        # 12) Final linear projection
         out = self.out_proj(out)  # [B, T, d_model]
 
         return out
-    
+        
 class MoEFeedForwardTop2(nn.Module):
     """
     MoE feed-forward module with top-2 gating and optional gating noise.
@@ -331,12 +338,8 @@ class CustomTransformerEncoderMoELayer(nn.Module):
                  num_experts=4,
                  gating_noise=0.0):
         super().__init__()
-        # Replace with the modified CustomMultiHeadAttentionStoich
-        self.self_attn = CustomMultiHeadAttentionStoich(
-            d_model=d_model,
-            nhead=nhead,
-            dropout=dropout
-        )
+        # Self-attention block with modified attention layer
+        self.self_attn = CustomMultiHeadAttention(d_model, nhead, dropout=dropout)
 
         # MoE feed-forward with top-2 gating + gating noise
         self.feed_forward = MoEFeedForwardTop2(
@@ -354,11 +357,11 @@ class CustomTransformerEncoderMoELayer(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
-    def forward(self, src, src_mask=None, src_key_padding_mask=None):
-        # 1) Self-attention
+    def forward(self, src, frac, src_mask=None, src_key_padding_mask=None):
+        # 1) Self-attention with frac
         attn_out = self.self_attn(
             src, src, src,
-            frac=src_key_padding_mask.float(),  # Assuming frac is passed via src_key_padding_mask
+            frac=frac,
             key_padding_mask=src_key_padding_mask,
             attn_mask=src_mask
         )
@@ -373,6 +376,20 @@ class CustomTransformerEncoderMoELayer(nn.Module):
         return src
 
 
+class CustomTransformerEncoderMoE(nn.Module):
+    def __init__(self, encoder_layer, num_layers):
+        super().__init__()
+        self.layers = nn.ModuleList([encoder_layer for _ in range(num_layers)])
+        # We omit final LayerNorm for simplicity
+
+    def forward(self, src, frac, mask=None, src_key_padding_mask=None):
+        output = src
+        for layer in self.layers:
+            output = layer(output,
+                           frac=frac,
+                           src_mask=mask,
+                           src_key_padding_mask=src_key_padding_mask)
+        return output
 
 
 class CustomTransformerEncoderMoE(nn.Module):
@@ -409,7 +426,6 @@ class EncoderMoE(nn.Module):
                  d_model,
                  N,
                  heads,
-                 frac=False,          # This can now be ignored or set to False
                  attn=True,
                  compute_device=None,
                  num_experts=4,
@@ -418,7 +434,6 @@ class EncoderMoE(nn.Module):
         self.d_model = d_model
         self.N = N
         self.heads = heads
-        self.fractional = frac
         self.attention = attn
         self.compute_device = compute_device
 
@@ -426,16 +441,11 @@ class EncoderMoE(nn.Module):
         self.embed = Embedder(d_model=self.d_model,
                               compute_device=self.compute_device)
 
-        # Remove FractionalEncoder instances
-        # self.pe = FractionalEncoder(self.d_model, resolution=5000, log10=False)
-        # self.ple = FractionalEncoder(self.d_model, resolution=5000, log10=True)
+        # Removed FractionalEncoder
+        # self.pe and self.ple are removed
 
-        # Remove positional scalers
-        # self.pos_scaler = nn.parameter.Parameter(torch.tensor([1.]))
-        # self.pos_scaler_log = nn.parameter.Parameter(torch.tensor([1.]))
-
-        self.emb_scaler = nn.parameter.Parameter(torch.tensor([1.]))
-        # Remove positional encoding scalers as we are removing FractionalEncoder
+        # Removed positional scalers
+        # self.pe_scaler and self.ple_scaler are removed
 
         if self.attention:
             encoder_layer = CustomTransformerEncoderMoELayer(
@@ -454,27 +464,22 @@ class EncoderMoE(nn.Module):
 
     def forward(self, src, frac):
         print(f'frac {frac}')
-        x = self.embed(src) * 2**self.emb_scaler
+        x = self.embed(src)  # [B, T, d_model]
 
         src_key_padding_mask = (frac == 0)
-        # Remove positional encodings
-        # pe = torch.zeros_like(x)
-        # ple = torch.zeros_like(x)
-        # pe_scaler = 2**((1 - self.pos_scaler)**2)
-        # ple_scaler = 2**((1 - self.pos_scaler_log)**2)
-        # pe[:, :, :self.d_model//2] = self.pe(frac) * pe_scaler
-        # ple[:, :, self.d_model//2:] = self.ple(frac) * ple_scaler
 
         if self.attention:
-            x_src = x  # Since positional encodings are removed
             x = self.transformer_encoder(
-                x_src,
+                x,
+                frac=frac,  # Pass frac to the transformer encoder
                 mask=None,
                 src_key_padding_mask=src_key_padding_mask
             )
 
-        if self.fractional:
-            x = x * frac.unsqueeze(2).repeat(1, 1, self.d_model)
+        # If fractional scaling is still desired
+        # Uncomment the following lines if needed
+        # if self.fractional:
+        #     x = x * frac.unsqueeze(2).repeat(1, 1, self.d_model)
 
         hmask = (frac == 0).unsqueeze(-1).repeat(1, 1, self.d_model)
         x = x.masked_fill(hmask, 0)
@@ -504,7 +509,6 @@ class Madani(nn.Module):
             d_model=self.d_model,
             N=self.N,
             heads=self.heads,
-            frac=False,  # Since fractional encoder is removed
             attn=True,
             compute_device=self.compute_device,
             num_experts=num_experts,
@@ -519,22 +523,21 @@ class Madani(nn.Module):
             self.output_nn = ResidualNetwork(self.d_model, self.out_dims, self.out_hidden)
 
     def forward(self, src, frac):
-        output = self.encoder(src, frac)
+        output = self.encoder(src, frac)  # [B, T, d_model]
         mask = (src == 0).unsqueeze(-1).repeat(1, 1, self.out_dims)
-        output = self.output_nn(output)
+        output = self.output_nn(output)  # [B, T, out_dims]
 
         if self.avg:
             output = output.masked_fill(mask, 0)
-            output = output.sum(dim=1) / (~mask).sum(dim=1)
+            # To prevent division by zero, add a small epsilon
+            denominator = (~mask).sum(dim=1).clamp(min=1).unsqueeze(-1).type_as(output)
+            output = output.sum(dim=1) / denominator  # [B, out_dims]
             output, logits = output.chunk(2, dim=-1)
             probability = torch.ones_like(output)
             probability[:, :logits.shape[-1]] = torch.sigmoid(logits)
             output = output * probability
 
         return output
-
-
-
 
 # %%
 if __name__ == '__main__':
