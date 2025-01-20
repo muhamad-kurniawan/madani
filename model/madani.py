@@ -352,7 +352,7 @@ class EncoderConvThenTransformer(nn.Module):
                  layer_norm_eps=1e-5,
                  num_experts=4,
                  gating_noise=0.0,
-                 
+                 N=4
                  compute_device=None):
         super().__init__()
         self.compute_device = compute_device
@@ -407,7 +407,7 @@ class Madani(nn.Module):
                  compute_device=None,
                  residual_nn='roost',
                  num_experts=4,
-                 gating_noise=0.1):
+                 gating_noise=0.1,):
         super().__init__()
         self.avg = True
         self.out_dims = out_dims
