@@ -130,55 +130,6 @@ class FractionalEncoder(nn.Module):
 
         return out
 
-def build_stoich_rope_angles(fraction, head_dim, base=10000.0, scale=1000.0):
-    """
-    fraction: [B, T] with values in [0,1], possibly with some zeros for padding.
-    head_dim: e.g., 64 if d_model=512 and nhead=8.
-    base:     the base for the RoPE denominator, commonly 10000.0
-    scale:    how large you want to treat 'fraction' (like 'position')
-
-    Returns angles: [B, T, head_dim/2].
-    We typically do angles[b,t,i] = ( fraction[b,t]*scale ) / base^(2*i/head_dim).
-    """
-    assert head_dim % 2 == 0, "head_dim must be even for RoPE."
-    half_dim = head_dim // 2
-
-    B, T = fraction.shape
-    # positions ~ fraction * scale
-    positions = fraction * scale  # shape [B, T]
-
-    # freq_div shape => [half_dim]
-    i_idx = torch.arange(half_dim, device=fraction.device, dtype=fraction.dtype)
-    freq_div = base**(2 * i_idx / float(head_dim))  # shape [half_dim]
-
-    # angles => shape [B, T, half_dim]
-    # angles[b,t,i] = positions[b,t] / freq_div[i]
-    # We'll expand freq_div to [1,1,half_dim]
-    angles = positions.unsqueeze(-1) / freq_div.view(1, 1, half_dim)
-    return angles
-
-
-
-def rope_rotate_stoich(x, angles):
-    """
-    x:      [B, nhead, T, head_dim]
-    angles: [B, T, half_dim]  (our fraction-based angles)
-    Returns x_rot with same shape [B, nhead, T, head_dim].
-    """
-    B, nhead, T, d = x.shape
-    half = d // 2
-
-    x_left = x[..., :half]   # [B, nhead, T, half]
-    x_right= x[..., half:]   # [B, nhead, T, half]
-
-    # angles => [B, T, half], need to broadcast to [B, nhead, T, half]
-    freq_cos = torch.cos(angles).unsqueeze(1)  # => [B, 1, T, half]
-    freq_sin = torch.sin(angles).unsqueeze(1)  # => [B, 1, T, half]
-
-    x_rot_left  = x_left  * freq_cos - x_right * freq_sin
-    x_rot_right = x_left  * freq_sin + x_right * freq_cos
-
-    return torch.cat([x_rot_left, x_rot_right], dim=-1)  # [B, nhead, T, d]
 
 import torch
 import torch.nn as nn
@@ -188,83 +139,134 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import torch.nn.functional as F
-
-import torch.nn.functional as F
-
-import torch.nn.functional as F
-
-class CustomMultiHeadAttentionStoichRoPE(nn.Module):
-    def __init__(self, d_model, nhead, dropout=0.1, base=10000.0, scale=1000.0):
-        """
-        base, scale: parameters controlling how we interpret fraction as "position."
-        """
+# class CustomMultiHeadAttention(nn.Module):
+class CustomMultiHeadAttentionStoich(nn.Module):
+    """
+    Multi-Head Attention that does:
+        1) compute dotprod_logits = QK^T
+        2) compute stoich_bias based on frac_j - frac_i
+        3) z-score normalize each separately
+        4) combine them as gamma * dotprod_logits + delta * stoich_bias
+    """
+    def __init__(self, d_model, nhead, dropout=0.1):
         super().__init__()
-        assert d_model % nhead == 0
+        assert d_model % nhead == 0, "d_model must be divisible by nhead"
         self.d_model = d_model
         self.nhead = nhead
         self.head_dim = d_model // nhead
-        self.dropout = nn.Dropout(dropout)
 
-        # Q, K, V, out
         self.W_q = nn.Linear(d_model, d_model)
         self.W_k = nn.Linear(d_model, d_model)
         self.W_v = nn.Linear(d_model, d_model)
         self.out_proj = nn.Linear(d_model, d_model)
 
-        self.scale_factor = (self.head_dim**-0.5)
-        self.base = base
-        self.scale = scale  # how we scale fraction
+        self.dropout = nn.Dropout(dropout)
+        self.scale = self.head_dim ** -0.5
 
-    def forward(self, 
-                x,    # [B, T, d_model]
-                frac, # [B, T], stoichiometric fraction
-                key_padding_mask=None,
-                attn_mask=None):
-        B, T, _ = x.shape
+        # Two per-head stoich parameters for positive/negative difference
+        self.alpha_pos = nn.Parameter(torch.zeros(nhead))
+        self.alpha_neg = nn.Parameter(torch.zeros(nhead))
+
+        # Weighted mix parameters for final combination
+        self.gamma = nn.Parameter(torch.tensor(1.0))
+        self.delta = nn.Parameter(torch.tensor(0.2))
+
+    def forward(
+        self,
+        query,               # [B, T, d_model]
+        key,                 # [B, T, d_model]
+        value,               # [B, T, d_model]
+        frac,                # [B, T]
+        key_padding_mask=None,  
+        attn_mask=None,
+        add_frac_bias=None
+    ):
+        """
+        Args:
+            query: [B, T, d_model]
+            key:   [B, T, d_model]
+            value: [B, T, d_model]
+            frac:  [B, T], stoichiometric fractions
+        """
+        B, T, _ = query.shape
 
         # 1) Q, K, V
-        Q = self.W_q(x)
-        K = self.W_k(x)
-        V = self.W_v(x)
+        Q = self.W_q(query)
+        K = self.W_k(key)
+        V = self.W_v(value)
 
-        # 2) Reshape => [B, nhead, T, head_dim]
+        # 2) Reshape [B, T, d_model] => [B, nhead, T, head_dim]
         Q = Q.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
         K = K.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
         V = V.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
 
-        # 3) Build fraction-based angles => shape [B, T, half_dim]
-        angles = build_stoich_rope_angles(frac, self.head_dim, base=self.base, scale=self.scale)
+        # 3) Standard dot-product => shape [B, nhead, T, T]
+        dotprod_logits = torch.matmul(Q, K.transpose(-1, -2)) * self.scale
 
-        # 4) Rotate Q, K
-        Q = rope_rotate_stoich(Q, angles)  # [B, nhead, T, head_dim]
-        K = rope_rotate_stoich(K, angles)
+        # 4) Stoichiometric difference => D = frac_j - frac_i => [B, T, T]
+        frac_i = frac.unsqueeze(-1)  # => [B, T, 1]
+        frac_j = frac.unsqueeze(1)   # => [B, 1, T]
+        # D = (frac_j - frac_i)          # => [B, T, T]
+        D = (frac_j - frac_i)/(frac_i*frac_j+ 1e-8) 
+        # print('frac_j : ',{frac_j})
+        # print('frac_i : ',{frac_i})
+        # print('D : ',{D})
 
-        # 5) Dot-product attention
-        attn_weights = torch.matmul(Q, K.transpose(-1, -2)) * self.scale_factor
+        # Positive & negative split
+        D_pos = F.relu(D)      # zero out negatives
+        D_neg = -F.relu(-D)    # zero out positives
 
-        # optional masks
+        # expand => [B, nhead, T, T]
+        alpha_pos = self.alpha_pos.view(1, self.nhead, 1, 1)
+        alpha_neg = self.alpha_neg.view(1, self.nhead, 1, 1)
+        stoich_bias = alpha_pos * D_pos.unsqueeze(1) + alpha_neg * D_neg.unsqueeze(1)
+
+        # 5) (Optional) z-score normalize each of dotprod_logits, stoich_bias
+        #    We'll do a simple approach: mean & std across the last dimension (-1)
+        #    i.e., each [B, nhead, T, T] is normalized T_k-dimension wise.
+        dotprod_logits = self._zscore_last_dim(dotprod_logits)
+        stoich_bias = self._zscore_last_dim(stoich_bias)
+
+        # 6) Weighted mix
+        if add_frac_bias:
+            attn_weights = self.gamma * dotprod_logits + self.delta * stoich_bias
+        else:
+            attn_weights = self.gamma * dotprod_logits
+        # 7) Masks
         if attn_mask is not None:
             attn_weights = attn_weights + attn_mask
+
         if key_padding_mask is not None:
-            expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, T]
+            expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
             attn_weights = attn_weights.masked_fill(expanded_mask, float('-inf'))
 
+        # 8) Softmax
         attn_probs = F.softmax(attn_weights, dim=-1)
         attn_probs = self.dropout(attn_probs)
 
-        # 6) Weighted sum
-        out = torch.matmul(attn_probs, V)  # [B, nhead, T, head_dim]
+        # 9) Weighted sum of V => [B, nhead, T, head_dim]
+        out = torch.matmul(attn_probs, V)
 
-        # 7) Reshape => [B, T, d_model]
+        # 10) Reshape => [B, T, d_model]
         out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
 
-        # 8) Final projection
+        # 11) Final projection
         out = self.out_proj(out)
         return out
 
-
-
+    @staticmethod
+    def _zscore_last_dim(tensor, eps=1e-5):
+        """
+        z-score normalize across the last dimension of shape [B, nhead, T, T].
+        i.e. for each (B, nhead, T_q) slice, we standardize across T_k:
+          t' = (t - mean_tk) / (std_tk + eps)
+        """
+        # shape of tensor => [B, nhead, T_q, T_k]
+        # we want mean & std over the last dimension => T_k
+        mean = tensor.mean(dim=-1, keepdim=True)
+        std = tensor.std(dim=-1, keepdim=True)
+        return (tensor - mean) / (std + eps)
+        
 class MoEFeedForwardTop2(nn.Module):
     """
     MoE feed-forward module with top-2 gating and optional gating noise.
@@ -276,14 +278,6 @@ class MoEFeedForwardTop2(nn.Module):
                  dropout=0.1, 
                  num_experts=4, 
                  gating_noise=0.0):
-        """
-        Args:
-            d_model (int): Model embedding dimension.
-            dim_feedforward (int): Hidden size in each expert's FFN.
-            dropout (float): Dropout probability.
-            num_experts (int): Number of parallel experts.
-            gating_noise (float): Standard deviation for gating noise; 0.0 = no noise.
-        """
         super().__init__()
         self.num_experts = num_experts
         self.gating_noise = gating_noise
@@ -291,7 +285,7 @@ class MoEFeedForwardTop2(nn.Module):
         # Gating network: from d_model -> num_experts
         self.gate = nn.Linear(d_model, num_experts)
 
-        # Experts: each is a small feed-forward block (d_model -> dim_feedforward -> d_model)
+        # Experts
         self.experts = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(d_model, dim_feedforward),
@@ -306,53 +300,40 @@ class MoEFeedForwardTop2(nn.Module):
     def forward(self, x):
         """
         x: [B, T, d_model]
-        Returns:
-            out: [B, T, d_model]
         """
         B, T, d = x.shape
+        # 1) Gating logits
+        gating_logits = self.gate(x)  # => [B, T, num_experts]
 
-        # 1) Compute gating logits
-        gating_logits = self.gate(x)  # [B, T, num_experts]
-
-        # 2) Inject gating noise (only during training, often)
+        # 2) Noise
         if self.training and self.gating_noise > 0.0:
             noise = torch.randn_like(gating_logits) * self.gating_noise
             gating_logits = gating_logits + noise
 
-        # 3) Softmax over experts
-        gating_scores = F.softmax(gating_logits, dim=-1)  # [B, T, num_experts]
+        # 3) Softmax
+        gating_scores = F.softmax(gating_logits, dim=-1)
 
         # 4) Top-2 gating
         top2_scores, top2_experts = gating_scores.topk(2, dim=-1)  
-        # top2_scores:   [B, T, 2] (the gating probabilities for the top 2 experts)
-        # top2_experts:  [B, T, 2] (the expert indices)
-
-        # 5) Initialize output buffer
         out = torch.zeros_like(x)
 
-        # 6) For each of the two selected experts, gather tokens, forward them, and add weighted output
         for rank in range(2):
-            # expert indices for this rank
-            expert_idx = top2_experts[..., rank]    # [B, T]
-            # gating weights for this rank
-            gating_weight = top2_scores[..., rank]  # [B, T]
+            expert_idx = top2_experts[..., rank]   
+            gating_weight = top2_scores[..., rank]  
 
             for e_idx in range(self.num_experts):
-                mask = (expert_idx == e_idx)  # [B, T] bool
+                mask = (expert_idx == e_idx)  
                 if mask.any():
-                    selected_x = x[mask]  # shape [N, d_model]
-                    expert_out = self.experts[e_idx](selected_x)  # [N, d_model]
-
-                    # Multiply by gating weight
-                    weight = gating_weight[mask].unsqueeze(-1)  # [N, 1]
+                    selected_x = x[mask]          # shape [N, d]
+                    expert_out = self.experts[e_idx](selected_x) 
+                    weight = gating_weight[mask].unsqueeze(-1)
                     weighted_out = weight * expert_out
-
-                    # Scatter back to the output buffer
                     out[mask] += weighted_out
-
         return out
 
-class CustomTransformerEncoderMoELayer(nn.Module):
+
+# class CustomTransformerEncoderMoELayerStoich(nn.Module):
+class CustomTransformerEncoderMoELayerStoich(nn.Module):
     def __init__(self, 
                  d_model, 
                  nhead,
@@ -360,17 +341,13 @@ class CustomTransformerEncoderMoELayer(nn.Module):
                  dropout=0.1,
                  layer_norm_eps=1e-5,
                  num_experts=4,
-                 gating_noise=0.0,
-                 rope_base=10000.0,
-                 rope_scale=1000.0):
+                 gating_noise=0.0):
         super().__init__()
-        # Replace old attention with StoichRoPE
-        self.self_attn = CustomMultiHeadAttentionStoichRoPE(
-            d_model, nhead, dropout=dropout,
-            base=rope_base,
-            scale=rope_scale
-        )
+        
+        # Stoich-based multi-head attention
+        self.self_attn = CustomMultiHeadAttentionStoich(d_model, nhead, dropout=dropout)
 
+        # MoE feed-forward
         self.feed_forward = MoEFeedForwardTop2(
             d_model=d_model,
             dim_feedforward=dim_feedforward,
@@ -379,47 +356,95 @@ class CustomTransformerEncoderMoELayer(nn.Module):
             gating_noise=gating_noise
         )
 
+        # LayerNorms and Dropouts
         self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
         self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
-    def forward(self, src, frac, src_mask=None, src_key_padding_mask=None):
-        # 1) StoichRoPE-based attention
+        # -----------------------------------------------------------------------
+        # (A) Fractional MLP or "encoder" to generate a bias vector [d_model]
+        # -----------------------------------------------------------------------
+        self.frac_mlp = nn.Sequential(
+            nn.Linear(1, d_model),   # from scalar fraction to d_model
+            nn.ReLU(),
+            nn.Linear(d_model, d_model)
+        )
+
+    def forward(self, src, frac, src_mask=None, src_key_padding_mask=None,add_frac_bias=False):
+        """
+        Args:
+            src: [B, T, d_model] hidden representation
+            frac: [B, T] stoichiometric fractions
+        """
+        # 1) Stoich-based self-attention
         attn_out = self.self_attn(
-            x=src,
+            query=src,
+            key=src,
+            value=src,
             frac=frac,
             key_padding_mask=src_key_padding_mask,
-            attn_mask=src_mask
+            attn_mask=src_mask,
+            add_frac_bias=add_frac_bias
         )
-        src = src + self.dropout1(attn_out)
+        attn_out = self.dropout1(attn_out)
+
+        # -----------------------------------------------------------------------
+        # (B) Compute an extra fraction-based bias to add into the residual
+        # -----------------------------------------------------------------------
+        if add_frac_bias:
+            stoich_bias = self.compute_stoich_bias(frac)  # [B, T, d_model]
+        
+            
+
+        # 2) Residual connection = src + attn_out + stoich_bias
+        
+            src = src + attn_out + stoich_bias
+        else:
+            src = src + attn_out
         src = self.norm1(src)
 
-        # 2) MoE feed-forward
+        # 3) MoE feed-forward
         ff_out = self.feed_forward(src)
-        src = src + self.dropout2(ff_out)
+        ff_out = self.dropout2(ff_out)
+        src = src + ff_out
         src = self.norm2(src)
+
         return src
 
+    def compute_stoich_bias(self, frac):
+        """
+        frac: [B, T], each is a scalar fraction
+        returns: [B, T, d_model] to be added in the residual
+        """
+        B, T = frac.shape
+        # Flatten: [B*T, 1]
+        frac_flat = frac.view(B*T, 1)  # shape [B*T, 1]
+
+        # MLP -> shape [B*T, d_model]
+        bias_flat = self.frac_mlp(frac_flat)
+
+        # Reshape back -> [B, T, d_model]
+        return bias_flat.view(B, T, -1)
 
 
-
-
-class CustomTransformerEncoderMoE(nn.Module):
+class CustomTransformerEncoderMoEStoich(nn.Module):
     def __init__(self, encoder_layer, num_layers):
         super().__init__()
         self.layers = nn.ModuleList([encoder_layer for _ in range(num_layers)])
 
     def forward(self, src, frac, mask=None, src_key_padding_mask=None):
-        output = src
-        for layer in self.layers:
-            output = layer(
-                output,
-                frac=frac,  # pass fractions to each layer
+        out = src
+        for i, layer in enumerate(self.layers):
+            add_bias = (i==0)
+            out = layer(
+                out, frac=frac,
                 src_mask=mask,
-                src_key_padding_mask=src_key_padding_mask
+                src_key_padding_mask=src_key_padding_mask,
+                add_frac_bias=add_bias
             )
-        return output
+        return out
+
 
 
 import pandas as pd
@@ -436,72 +461,61 @@ import torch.nn as nn
 # Reuse the same fraction encoders, embedder, etc. from your original code
 # Reuse the same CustomMultiHeadAttention from your previous custom attention code
 
-class EncoderMoE(nn.Module):
+class EncoderMoEStoichNoFracEnc(nn.Module):
+    """
+    Stoich-based Encoder with MoE, but WITHOUT the old fractional encoder logic.
+    """
     def __init__(self,
                  d_model,
                  N,
                  heads,
-                 frac=False,
-                 attn=True,
                  compute_device=None,
                  num_experts=4,
-                 gating_noise=0.0,
-                 rope_base=10000.0,
-                 rope_scale=1000.0):
+                 gating_noise=0.0):
         super().__init__()
         self.d_model = d_model
         self.N = N
         self.heads = heads
-        self.fractional = frac
-        self.attention = attn
         self.compute_device = compute_device
 
-        # Still use your element embedder
+        # We still embed the element indices => [B, T, d_model]
         self.embed = Embedder(d_model=self.d_model, compute_device=self.compute_device)
 
-        self.emb_scaler = nn.parameter.Parameter(torch.tensor([1.]))
-
-        if self.attention:
-            encoder_layer = CustomTransformerEncoderMoELayer(
-                d_model=self.d_model,
-                nhead=self.heads,
-                dim_feedforward=2048,
-                dropout=0.1,
-                layer_norm_eps=1e-5,
-                num_experts=num_experts,
-                gating_noise=gating_noise,
-                rope_base=rope_base,
-                rope_scale=rope_scale
-            )
-            self.transformer_encoder = CustomTransformerEncoderMoE(
-                encoder_layer=encoder_layer,
-                num_layers=self.N
-            )
+        # Build the stoich-based Transformer
+        encoder_layer = CustomTransformerEncoderMoELayerStoich(
+            d_model=self.d_model,
+            nhead=self.heads,
+            dim_feedforward=2048,
+            dropout=0.1,
+            layer_norm_eps=1e-5,
+            num_experts=num_experts,
+            gating_noise=gating_noise
+        )
+        self.transformer_encoder = CustomTransformerEncoderMoEStoich(
+            encoder_layer=encoder_layer,
+            num_layers=self.N
+        )
 
     def forward(self, src, frac):
-        x = self.embed(src) * 2**self.emb_scaler
+        """
+        src: [B, T], element indices
+        frac: [B, T], stoichiometric fractions
+        """
+        # 1) Basic element embedding
+        x = self.embed(src)  # => [B, T, d_model]
 
-        # We'll treat zero fraction as padding
-        src_key_padding_mask = (frac == 0.)
+        # 2) Key padding mask => True for padded positions
+        src_key_padding_mask = (src == 0)
 
-        if self.attention:
-            x = self.transformer_encoder(
-                src=x,
-                frac=frac,
-                mask=None,
-                src_key_padding_mask=src_key_padding_mask
-            )
+        # 3) Pass to stoich-based transformer
+        #    The stoich attention will do frac_j - frac_i
+        out = self.transformer_encoder(
+            x, frac=frac,
+            mask=None,
+            src_key_padding_mask=src_key_padding_mask
+        )
 
-        # optional multiply by frac if desired
-        if self.fractional:
-            x = x * frac.unsqueeze(2)
-
-        # zero out
-        hmask = (frac == 0.).unsqueeze(-1)
-        x = x.masked_fill(hmask, 0)
-        return x
-
-
+        return out
 
 
 
@@ -523,7 +537,8 @@ class Madani(nn.Module):
         self.heads = heads
         self.compute_device = compute_device
 
-        self.encoder = EncoderMoE(
+        # This uses no fractional encoding
+        self.encoder = EncoderMoEStoichNoFracEnc(
             d_model=self.d_model,
             N=self.N,
             heads=self.heads,
@@ -532,6 +547,7 @@ class Madani(nn.Module):
             gating_noise=gating_noise
         )
 
+        # The existing residual MLP
         if residual_nn == 'roost':
             self.out_hidden = [1024, 512, 256, 128]
             self.output_nn = ResidualNetwork(self.d_model, self.out_dims, self.out_hidden)
@@ -540,23 +556,29 @@ class Madani(nn.Module):
             self.output_nn = ResidualNetwork(self.d_model, self.out_dims, self.out_hidden)
 
     def forward(self, src, frac):
-        output = self.encoder(src, frac)
+        """
+        src: [B, T] element indices
+        frac: [B, T] stoichiometric fractions
+        """
+        # Pass to the stoich-based encoder
+        output = self.encoder(src, frac)   # => [B, T, d_model]
+
+        # Build a mask for final output if needed
         mask = (src == 0).unsqueeze(-1).repeat(1, 1, self.out_dims)
         output = self.output_nn(output)
 
+        # If you do averaging or chunking:
         if self.avg:
             output = output.masked_fill(mask, 0)
+            # average over T dimension
             output = output.sum(dim=1) / (~mask).sum(dim=1)
+            # split into final predictions + logits if you like
             output, logits = output.chunk(2, dim=-1)
             probability = torch.ones_like(output)
             probability[:, :logits.shape[-1]] = torch.sigmoid(logits)
             output = output * probability
 
         return output
-
-
-
-
 # %%
 if __name__ == '__main__':
     model = Madani()
