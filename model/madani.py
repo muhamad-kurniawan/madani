@@ -403,6 +403,7 @@ class EncoderMoE(nn.Module):
                  N, 
                  heads, 
                  stoich_bias=None,  # Include stoichiometric bias
+                 attn=True,
                  compute_device=None, 
                  num_experts=4, 
                  gating_noise=0.0):
@@ -411,7 +412,7 @@ class EncoderMoE(nn.Module):
         self.N = N
         self.heads = heads
         self.compute_device = compute_device
-
+        self.attention = attn
         # Embedder and encoders as before
         self.embed = Embedder(d_model=self.d_model, compute_device=self.compute_device)
         self.pe = FractionalEncoder(self.d_model, resolution=5000, log10=False)
