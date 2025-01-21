@@ -463,7 +463,7 @@ class EncoderMoE(nn.Module):
             )
 
     def forward(self, src, frac):
-        print(f'frac {frac}')
+        # print(f'frac {frac}')
         x = self.embed(src) * 2**self.emb_scaler
 
         src_key_padding_mask = (frac == 0)
