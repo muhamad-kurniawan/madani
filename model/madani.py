@@ -146,7 +146,7 @@ class RBFEncoder(nn.Module):
     def __init__(self,
                  rbf_dim,         # output dimension
                  num_centers=100,
-                 gamma=10.0,
+                 gamma=5.0,
                  log10=False,
                  compute_device=None):
         super().__init__()
