@@ -520,8 +520,8 @@ class EncoderMoE(nn.Module):
         # )
         self.pe = RBFEncoder(
             rbf_dim=self.d_model,
-            num_centers=50,
-            gamma=5.0,
+            num_centers=100,
+            gamma=2,
             log10=False,
             compute_device=self.compute_device
         )
