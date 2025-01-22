@@ -511,24 +511,24 @@ class EncoderMoE(nn.Module):
         self.embed = Embedder(d_model=self.d_model, compute_device=self.compute_device)
 
         # RBFEncoders for fractional encoding
-        # self.pe = RBFEncoder(
-        #     rbf_dim=self.d_model // 2,
-        #     num_centers=100,
-        #     gamma=10.0,
-        #     log10=False,
-        #     compute_device=self.compute_device
-        # )
         self.pe = RBFEncoder(
-            rbf_dim=self.d_model,
+            rbf_dim=self.d_model // 2,
             num_centers=100,
-            gamma=2.0,
+            gamma=5.0,
             log10=False,
             compute_device=self.compute_device
         )
+        # self.pe = RBFEncoder(
+        #     rbf_dim=self.d_model,
+        #     num_centers=100,
+        #     gamma=2.0,
+        #     log10=False,
+        #     compute_device=self.compute_device
+        # )
         self.ple = RBFEncoder(
             rbf_dim=self.d_model // 2,
             num_centers=100,
-            gamma=10.0,
+            gamma=5.0,
             log10=True,
             compute_device=self.compute_device
         )
@@ -565,8 +565,8 @@ class EncoderMoE(nn.Module):
         ple_scaler = 2**((1 - self.pos_scaler_log)**2)
         pe_out = self.pe(frac) * pe_scaler        # [B, T, d_model//2]
         ple_out = self.ple(frac) * ple_scaler     # [B, T, d_model//2]
-        # pos_enc = torch.cat([pe_out, ple_out], dim=-1)  # [B, T, d_model]
-        pos_enc = pe_out  # [B, T, d_model]
+        pos_enc = torch.cat([pe_out, ple_out], dim=-1)  # [B, T, d_model]
+        # pos_enc = pe_out  # [B, T, d_model]
 
         # If you want to add them, do:
         if self.attention:
