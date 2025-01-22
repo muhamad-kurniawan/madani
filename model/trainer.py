@@ -262,8 +262,8 @@ class ModelTrainer:
                 self.loss_curve['val'].append(mae_v)
 
                 epoch_str = f'Epoch: {epoch}/{epochs} ---'
-                train_str = f'train mae: {self.loss_curve["train"][-1]:0.3g}'
-                val_str = f'val mae: {self.loss_curve["val"][-1]:0.3g}'
+                train_str = f'train mae: {self.loss_curve["train"][-1]:0.4g}'
+                val_str = f'val mae: {self.loss_curve["val"][-1]:0.4g}'
 
                 # If classification, evaluate AUC
                 if self.classification:
