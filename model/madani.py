@@ -521,7 +521,7 @@ class EncoderMoE(nn.Module):
         self.pe = RBFEncoder(
             rbf_dim=self.d_model,
             num_centers=100,
-            gamma=2,
+            gamma=2.0,
             log10=False,
             compute_device=self.compute_device
         )
