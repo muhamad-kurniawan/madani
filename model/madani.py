@@ -558,7 +558,8 @@ class EncoderMoE(nn.Module):
         ple_scaler = 2**((1 - self.pos_scaler_log)**2)
         pe_out = self.pe(frac) * pe_scaler        # [B, T, d_model//2]
         ple_out = self.ple(frac) * ple_scaler     # [B, T, d_model//2]
-        pos_enc = torch.cat([pe_out, ple_out], dim=-1)  # [B, T, d_model]
+        # pos_enc = torch.cat([pe_out, ple_out], dim=-1)  # [B, T, d_model]
+        pos_enc = pe_out  # [B, T, d_model]
 
         # If you want to add them, do:
         if self.attention:
