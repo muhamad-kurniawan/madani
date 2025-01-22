@@ -511,8 +511,15 @@ class EncoderMoE(nn.Module):
         self.embed = Embedder(d_model=self.d_model, compute_device=self.compute_device)
 
         # RBFEncoders for fractional encoding
+        # self.pe = RBFEncoder(
+        #     rbf_dim=self.d_model // 2,
+        #     num_centers=100,
+        #     gamma=10.0,
+        #     log10=False,
+        #     compute_device=self.compute_device
+        # )
         self.pe = RBFEncoder(
-            rbf_dim=self.d_model // 2,
+            rbf_dim=self.d_model,
             num_centers=100,
             gamma=10.0,
             log10=False,
