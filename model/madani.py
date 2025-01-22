@@ -476,8 +476,8 @@ class EncoderMoE(nn.Module):
         ple[:, :, self.d_model//2:] = self.ple(frac) * ple_scaler
 
         if self.attention:
-            x_src = x + pe + ple
-            # x_src = x + pe
+            # x_src = x + pe + ple
+            x_src = x + pe
             x = self.transformer_encoder(
                 x_src,
                 mask=None,
