@@ -79,59 +79,7 @@ class Embedder(nn.Module):
         return x_emb
 
 
-# %%
-class FractionalEncoder(nn.Module):
-    """
-    Fractional Encoder with soft transitions using interpolation.
-    Inspired by positional encoders, but designed for smooth fractional encoding.
-    """
-    def __init__(self, d_model, resolution=100, log10=False, compute_device=None):
-        super().__init__()
-        self.d_model = d_model // 2
-        self.resolution = resolution
-        self.log10 = log10
-        self.compute_device = compute_device
 
-        # Create a grid for the encoding
-        x = torch.linspace(0, self.resolution - 1, self.resolution, requires_grad=False).view(self.resolution, 1)
-        fraction = torch.linspace(0, self.d_model - 1, self.d_model, requires_grad=False).view(1, self.d_model).repeat(self.resolution, 1)
-
-        # Compute the sinusoidal and cosine encoding
-        pe = torch.zeros(self.resolution, self.d_model)
-        pe[:, 0::2] = torch.sin(x / torch.pow(50, 2 * fraction[:, 0::2] / self.d_model))
-        pe[:, 1::2] = torch.cos(x / torch.pow(50, 2 * fraction[:, 1::2] / self.d_model))
-
-        # Register buffer for encoding table
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        # Clone the input tensor to avoid modifications
-        x = x.clone()
-
-        # Apply log transformation if enabled
-        if self.log10:
-            x = 0.0025 * (torch.log2(x)) ** 2
-            x = torch.clamp(x, max=1)  # Clamp values to [0, 1]
-        x = torch.clamp(x, min=1 / self.resolution)  # Ensure values >= 1/resolution
-
-        # Scale input to the range [0, resolution)
-        x_scaled = x * (self.resolution - 1)
-
-        # Get lower and upper indices for interpolation
-        idx_lower = torch.floor(x_scaled).to(dtype=torch.long)
-        idx_upper = torch.ceil(x_scaled).to(dtype=torch.long)
-        idx_upper = torch.clamp(idx_upper, max=self.resolution - 1)
-
-        # Compute interpolation weights
-        weight_upper = x_scaled - idx_lower
-        weight_lower = 1 - weight_upper
-
-        # Interpolate between lower and upper encoding values
-        encoding_lower = self.pe[idx_lower]
-        encoding_upper = self.pe[idx_upper]
-        out = weight_lower.unsqueeze(-1) * encoding_lower + weight_upper.unsqueeze(-1) * encoding_upper
-
-        return out
 
 import torch
 import torch.nn as nn
