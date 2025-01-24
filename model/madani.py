@@ -351,7 +351,9 @@ class CustomMultiHeadAttention(nn.Module):
                 frac_k = stoich_frac[1]  # [B, T_k]
             
             # shape [B, T_q, 1] minus [B, 1, T_k] -> [B, T_q, T_k]
+            # stoich_diff = frac_q.unsqueeze(-1) - frac_k.unsqueeze(1)
             stoich_diff = frac_q.unsqueeze(-1) - frac_k.unsqueeze(1)
+            stoich_diff = stoich_diff/torch.mean(stoich_diff, 0)
             # For example: ALiBi-like transform
             # log1p(|x|) * sign(x)
             stoich_bias = torch.log1p(stoich_diff.abs()) * stoich_diff.sign()
