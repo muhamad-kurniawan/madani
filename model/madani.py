@@ -425,7 +425,7 @@ class EncoderMoE(nn.Module):
                  d_model,
                  N,
                  heads,
-                 frac=True,
+                 frac=False,
                  attn=True,
                  compute_device=None,
                  num_experts=4,
