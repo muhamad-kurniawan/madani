@@ -133,7 +133,6 @@ class FractionalEncoder(nn.Module):
 
         return out
 
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -141,6 +140,142 @@ import torch.nn.functional as F
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+def bspline_basis_1d(x, knots, degree):
+    """
+    Compute B-spline basis functions for input x (1D), using De Boor's recursion.
+    x: shape [N]  (1D tensor of fractions in [0,1])
+    knots: shape [n_knots]  (assumed sorted, possibly with repeats at ends)
+    degree: int
+
+    Returns: shape [N, n_basis]
+        where n_basis = n_knots - (degree + 1).
+    """
+    # We assume:
+    #   n_knots = n_basis + degree + 1
+    # Initialize 'B' for the 0th-degree piecewise constant basis:
+    n_knots = knots.shape[0]
+    n_basis = n_knots - (degree + 1)  # final number of B-spline basis functions
+
+    # B[d, i, n] will store B_{i,d}(x_n)
+    # We'll build up from d=0..degree
+    # For efficiency, store only 2 layers at a time
+    device = x.device
+    N = x.shape[0]
+
+    # shape for B: [n_knots-1, N] at d=0
+    # (since B_{i,0} is nonzero only in [t_i, t_{i+1}))
+    B_prev = torch.zeros((n_knots-1, N), dtype=x.dtype, device=device)
+
+    # Initialize B_{i,0}(x)
+    # For each i, B_{i,0}(x)=1 if knots[i] <= x < knots[i+1], else 0
+    # We'll do a loop or broadcast logic
+    for i in range(n_knots - 1):
+        left  = knots[i]
+        right = knots[i+1]
+        # condition: left <= x < right
+        mask = (x >= left) & (x < right)
+        # For the last knot interval, we can include equality at the end
+        # or handle boundary carefully if you want continuous coverage at 1.0
+        B_prev[i, mask] = 1.0
+
+    # Now recursively build up to higher degrees
+    for d in range(1, degree+1):
+        # new array B_curr for B_{i,d}
+        B_curr = torch.zeros((n_knots - d - 1, N), dtype=x.dtype, device=device)
+
+        for i in range(n_knots - d - 1):
+            denom1 = knots[i + d] - knots[i]
+            denom2 = knots[i + d + 1] - knots[i + 1]
+
+            term1 = 0.0
+            term2 = 0.0
+
+            if denom1 != 0:
+                term1 = (x - knots[i]) / denom1 * B_prev[i]
+            if denom2 != 0:
+                term2 = (knots[i + d + 1] - x) / denom2 * B_prev[i + 1]
+
+            B_curr[i] = term1 + term2
+
+        B_prev = B_curr  # move up one degree
+
+    # After d=degree, B_prev has shape [n_basis, N]
+    # Transpose to [N, n_basis] for convenience
+    B_final = B_prev.transpose(0, 1).contiguous()  # [N, n_basis]
+    return B_final
+
+class BSplineEncoder(nn.Module):
+    """
+    B-spline encoder for fractions in [0,1].
+    1) We'll define uniform knots with optional repeated endpoints.
+    2) Compute B-spline basis via De Boor recursion for each x in [B,T].
+    3) Project to a final dimension 'out_dim' with a linear layer.
+    """
+
+    def __init__(self,
+                 out_dim,
+                 n_basis=10,   # number of final basis functions
+                 degree=3, 
+                 log10=False,
+                 compute_device=None):
+        super().__init__()
+        self.out_dim = out_dim
+        self.n_basis = n_basis
+        self.degree = degree
+        self.log10 = log10
+        self.compute_device = compute_device
+
+        # We define n_knots = n_basis + degree + 1
+        self.n_knots = self.n_basis + self.degree + 1
+
+        # Create uniform knots in [0, 1].
+        # For B-splines, often we "clamp" the endpoints by repeating them degree times.
+        # For simplicity, let's do a naive approach:
+        #   knots = [0,0,0,...(degree times)..., 1,1,1...]
+        # or uniform. We'll do uniform plus repeats at the ends:
+        knots = torch.linspace(0, 1, self.n_knots - 2*self.degree)
+        # expand by repeating the first knot `degree` times and last knot `degree` times
+        knots = torch.cat([
+            knots[:1].repeat(self.degree), 
+            knots,
+            knots[-1:].repeat(self.degree)
+        ], dim=0)
+        # Now we have n_knots total
+        # Register as a buffer (non-trainable) or as a param if you want:
+        self.register_buffer('knots', knots)
+
+        # Linear projection from n_basis -> out_dim
+        self.out_proj = nn.Linear(self.n_basis, out_dim)
+
+    def forward(self, x):
+        """
+        x: shape [B, T], fractions in [0,1].
+        returns: shape [B, T, out_dim]
+        """
+        frac = x.clone()
+        frac = torch.clamp(frac, min=1e-9, max=1.0)
+
+        # Optional log10 transform
+        if self.log10:
+            frac = 0.0025 * (torch.log2(frac))**2
+            frac = torch.clamp(frac, 0.0, 1.0)
+
+        B, T = frac.shape
+        # Flatten to 1D for basis computation: shape [B*T]
+        frac_1d = frac.view(-1)
+
+        # Evaluate the B-spline basis -> shape [B*T, n_basis]
+        basis_1d = bspline_basis_1d(frac_1d, self.knots, self.degree)
+
+        # Project to out_dim
+        out_1d = self.out_proj(basis_1d)  # [B*T, out_dim]
+
+        # Reshape back to [B, T, out_dim]
+        out = out_1d.view(B, T, self.out_dim)
+        return out
+
+
 
 import torch
 import torch.nn as nn
@@ -425,7 +560,7 @@ class EncoderMoE(nn.Module):
                  d_model,
                  N,
                  heads,
-                 frac=False,
+                 frac=True,
                  attn=True,
                  compute_device=None,
                  num_experts=4,
@@ -438,10 +573,25 @@ class EncoderMoE(nn.Module):
         self.attention = attn
         self.compute_device = compute_device
 
-        # same embedder, fraction encoders
+        # same embedder
         self.embed = Embedder(d_model=self.d_model, compute_device=self.compute_device)
-        self.pe = FractionalEncoder(self.d_model, resolution=5000, log10=False)
-        self.ple = FractionalEncoder(self.d_model, resolution=5000, log10=True)
+
+        # Replace RBF with B-spline:
+        self.pe = BSplineEncoder(
+            out_dim=self.d_model, 
+            n_basis=10,   #  how many B-spline basis
+            degree=3,
+            log10=False,
+            compute_device=self.compute_device
+        )
+        # (Optionally) separate B-spline for log-scale
+        self.ple = BSplineEncoder(
+            out_dim=self.d_model // 2,
+            n_basis=20,
+            degree=3,
+            log10=True,
+            compute_device=self.compute_device
+        )
 
         self.emb_scaler = nn.parameter.Parameter(torch.tensor([1.]))
         self.pos_scaler = nn.parameter.Parameter(torch.tensor([1.]))
@@ -463,35 +613,32 @@ class EncoderMoE(nn.Module):
             )
 
     def forward(self, src, frac):
-        # print(f'frac {frac}')
-        x = self.embed(src) * 2**self.emb_scaler
+        x = self.embed(src) * 2.0**self.emb_scaler
 
-        src_key_padding_mask = (frac == 0)
-        pe = torch.zeros_like(x)
-        ple = torch.zeros_like(x)
-        pe_scaler = 2**((1 - self.pos_scaler)**2)
-        ple_scaler = 2**((1 - self.pos_scaler_log)**2)
+        # B-spline outputs
+        pe_scaler = 2.0**((1 - self.pos_scaler)**2)
+        ple_scaler = 2.0**((1 - self.pos_scaler_log)**2)
+        pe_out = self.pe(frac) * pe_scaler       # [B, T, d_model]
+        ple_out = self.ple(frac) * ple_scaler    # [B, T, d_model//2]
 
-        pe[:, :, :self.d_model//2] = self.pe(frac) * pe_scaler
-        ple[:, :, self.d_model//2:] = self.ple(frac) * ple_scaler
+        # Maybe combine them or just use one:
+        pos_enc = pe_out  # or torch.cat([pe_out, ple_out], dim=-1) if dimensions match
 
         if self.attention:
-            x_src = x + pe + ple
-            # x_src = x + pe
+            x_src = x + pos_enc
             x = self.transformer_encoder(
                 x_src,
                 mask=None,
-                src_key_padding_mask=src_key_padding_mask,
-                # Provide the stoichiometric fraction here:
+                src_key_padding_mask=(frac==0),
                 stoich_frac=frac
             )
 
         if self.fractional:
-            x = x * frac.unsqueeze(2).repeat(1, 1, self.d_model)
+            x = x * frac.unsqueeze(-1)
 
-        hmask = (frac == 0).unsqueeze(-1).repeat(1, 1, self.d_model)
-        x = x.masked_fill(hmask, 0)
+        x = x.masked_fill((frac==0).unsqueeze(-1), 0.0)
         return x
+
 
 
 
