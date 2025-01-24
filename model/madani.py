@@ -582,7 +582,7 @@ class EncoderMoE(nn.Module):
         self.pe = BSplineEncoder(
             out_dim=self.d_model, 
             n_basis=10,   #  how many B-spline basis
-            degree=4,
+            degree=2,
             log10=False,
             compute_device=self.compute_device
         )
