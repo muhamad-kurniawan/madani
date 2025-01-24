@@ -362,7 +362,7 @@ class CustomMultiHeadAttention(nn.Module):
             # Expand for nhead: [B, 1, T_q, T_k]
             stoich_bias = stoich_bias.unsqueeze(1)
             # Add to attention logits
-            attn_weights = attn_weights + stoich_bias
+            # attn_weights = attn_weights + stoich_bias
         # ----------------------------------------
 
         # If attn_mask is provided (e.g., subsequent mask), apply it
