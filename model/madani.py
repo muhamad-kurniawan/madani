@@ -579,7 +579,7 @@ class EncoderMoE(nn.Module):
         # Replace RBF with B-spline:
         self.pe = BSplineEncoder(
             out_dim=self.d_model, 
-            n_basis=20,   #  how many B-spline basis
+            n_basis=10,   #  how many B-spline basis
             degree=3,
             log10=False,
             compute_device=self.compute_device
