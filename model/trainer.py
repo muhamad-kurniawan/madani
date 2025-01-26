@@ -315,6 +315,14 @@ class ModelTrainer:
         Runs inference on a given DataLoader. Returns:
         (act, pred, formulae, uncert).
         """
+        if isinstance(loader, str):
+            loaders = DataHandler(loader,
+                                     batch_size=batch_size,
+                                     n_elements=self.n_elements,
+                                     inference=inference,
+                                     verbose=self.verbose,
+                                     drop_unary=self.drop_unary,
+                                     scale=self.scale)
         # print(f'loader predict shape {loader.dataset[0].shape}')
         len_dataset = len(loader.dataset)
         # Each sample is [n_elements, 2]. E.g. if shape = [n_elements, 2].
