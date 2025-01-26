@@ -316,7 +316,7 @@ class ModelTrainer:
         (act, pred, formulae, uncert).
         """
         if isinstance(loader, str):
-            loaders = DataHandler(loader,
+            loader = DataHandler(loader,
                                      batch_size=batch_size,
                                      n_elements=self.n_elements,
                                      inference=inference,
