@@ -568,6 +568,80 @@ class MoEFeedForwardTop2(nn.Module):
 
         return out
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MoEFeedForwardSoft(nn.Module):
+    """
+    MoE feed-forward module with soft gating over all experts.
+    Each token's output is a weighted sum of every expert's output.
+    """
+    def __init__(self, 
+                 d_model, 
+                 dim_feedforward=2048, 
+                 dropout=0.1, 
+                 num_experts=4, 
+                 gating_noise=0.0):
+        """
+        Args:
+            d_model (int): Model embedding dimension.
+            dim_feedforward (int): Hidden size in each expert's FFN.
+            dropout (float): Dropout probability.
+            num_experts (int): Number of parallel experts.
+            gating_noise (float): Std dev of noise to add to gating logits (0 = no noise).
+        """
+        super().__init__()
+        self.num_experts = num_experts
+        self.gating_noise = gating_noise
+
+        # Gating network: d_model -> num_experts
+        self.gate = nn.Linear(d_model, num_experts)
+
+        # Experts: each is a feed-forward block: (d_model -> dim_feedforward -> d_model)
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, dim_feedforward),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(dim_feedforward, d_model),
+                nn.Dropout(dropout),
+            )
+            for _ in range(num_experts)
+        ])
+
+    def forward(self, x):
+        """
+        x: shape [B, T, d_model]
+        Returns: shape [B, T, d_model]
+        """
+        B, T, d = x.shape
+
+        # 1) Compute gating logits
+        gating_logits = self.gate(x)  # [B, T, num_experts]
+
+        # 2) Inject gating noise during training (optional)
+        if self.training and self.gating_noise > 0.0:
+            noise = torch.randn_like(gating_logits) * self.gating_noise
+            gating_logits = gating_logits + noise
+
+        # 3) Softmax over all experts
+        gating_scores = F.softmax(gating_logits, dim=-1)  # [B, T, num_experts]
+
+        # 4) Evaluate all experts and combine
+        #    Each expert sees the entire mini-batch x, 
+        #    then we weight its output by gating_scores.
+        expert_outputs = []
+        for e_idx in range(self.num_experts):
+            out_e = self.experts[e_idx](x)  # [B, T, d]
+            weight_e = gating_scores[..., e_idx].unsqueeze(-1)  # [B, T, 1]
+            expert_outputs.append(weight_e * out_e)  # Weighted expert output
+
+        # 5) Sum across experts
+        out = torch.stack(expert_outputs, dim=-1).sum(dim=-1)  # [B, T, d]
+
+        return out
+
 class CustomTransformerEncoderMoELayer(nn.Module):
     def __init__(self, 
                  d_model, 
@@ -580,7 +654,7 @@ class CustomTransformerEncoderMoELayer(nn.Module):
         super().__init__()
         self.self_attn = CustomMultiHeadAttention(d_model, nhead, dropout=dropout)
 
-        self.feed_forward = MoEFeedForwardTop1(
+        self.feed_forward = MoEFeedForwardSoft(
             d_model=d_model,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
