@@ -317,9 +317,9 @@ class ModelTrainer:
         """
         if isinstance(loader, str):
             loader = DataHandler(loader,
-                                     batch_size=batch_size,
+                                     # batch_size=batch_size,
                                      n_elements=self.n_elements,
-                                     inference=inference,
+                                     inference=True,
                                      verbose=self.verbose,
                                      drop_unary=self.drop_unary,
                                      scale=self.scale)
