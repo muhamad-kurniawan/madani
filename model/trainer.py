@@ -319,7 +319,7 @@ class ModelTrainer:
         # If user passes a file path/string, re-instantiate a DataHandler
         if isinstance(loader, str):
             data_handler = DataHandler(
-                file_name=loader,
+                loader,
                 batch_size=64,
                 n_elements=self.n_elements,
                 inference=True,
