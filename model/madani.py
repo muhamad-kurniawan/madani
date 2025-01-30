@@ -193,7 +193,7 @@ class Encoder(nn.Module):
 
 
 # %%
-class CrabNet(nn.Module):
+class Madani(nn.Module):
     def __init__(self,
                  out_dims=3,
                  d_model=512,
