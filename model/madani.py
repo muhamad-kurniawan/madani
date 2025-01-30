@@ -393,6 +393,27 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class StandardFeedForward(nn.Module):
+    """
+    A simple feed-forward block for Transformer layers:
+      FFN(x) = Dropout(Linear2( ReLU(Linear1(x)) ))
+    """
+    def __init__(self, d_model, dim_feedforward=2048, dropout=0.1):
+        super().__init__()
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        # x: [B, T, d_model]
+        x2 = self.linear1(x)
+        x2 = self.activation(x2)
+        x2 = self.dropout(x2)
+        x2 = self.linear2(x2)
+        x2 = self.dropout(x2)
+        return x2
+
 class MoEFeedForwardTop1(nn.Module):
     """
     MoE feed-forward module with top-1 gating and optional gating noise.
@@ -642,24 +663,96 @@ class MoEFeedForwardSoft(nn.Module):
 
         return out
 
-class CustomTransformerEncoderMoELayer(nn.Module):
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class HashRouterMoEFeedForward(nn.Module):
+    """
+    MoE feed-forward module with a hash-based router (single-expert).
+    Each token is routed to exactly one expert based on a simple hash of a learned routing key.
+    """
+    def __init__(self, 
+                 d_model, 
+                 dim_feedforward=2048, 
+                 dropout=0.1, 
+                 num_experts=4):
+        """
+        Args:
+            d_model (int): Model embedding dimension.
+            dim_feedforward (int): Hidden size in each expert's FFN.
+            dropout (float): Dropout probability.
+            num_experts (int): Number of parallel experts.
+        """
+        super().__init__()
+        self.num_experts = num_experts
+
+        # A linear layer to produce a routing key: (d_model -> 1)
+        # We'll cast it to an integer for hashing.
+        self.router_key = nn.Linear(d_model, 1)
+
+        # Experts: each is a feed-forward block: d_model -> dim_feedforward -> d_model
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, dim_feedforward),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(dim_feedforward, d_model),
+                nn.Dropout(dropout),
+            )
+            for _ in range(num_experts)
+        ])
+
+    def forward(self, x):
+        """
+        x: [B, T, d_model]
+        Returns: [B, T, d_model]
+        """
+        B, T, d = x.shape
+
+        # 1) Compute routing keys: shape [B, T, 1]
+        routing_keys = self.router_key(x)
+
+        # 2) Convert to integer hash
+        #    We'll just round and cast to int as a naive “hash”.
+        #    Then mod by num_experts to get expert ID for each token.
+        #    (For real apps, you may want a stronger hash function.)
+        routing_keys_rounded = torch.floor(routing_keys.squeeze(-1)).to(torch.int64)  # [B, T]
+        expert_idx = torch.remainder(routing_keys_rounded, self.num_experts)         # [B, T]
+
+        # 3) Create output buffer
+        out = torch.zeros_like(x)
+
+        # 4) Dispatch tokens to each expert
+        for e_idx in range(self.num_experts):
+            mask = (expert_idx == e_idx)  # [B, T]
+            if mask.any():
+                # Gather tokens assigned to expert e_idx
+                selected_x = x[mask]  # shape [N, d_model]
+                # Forward pass in that expert
+                expert_out = self.experts[e_idx](selected_x)
+
+                # Scatter back
+                out[mask] = expert_out
+
+        return out
+
+
+class CustomTransformerEncoderLayer(nn.Module):
     def __init__(self, 
                  d_model, 
                  nhead,
                  dim_feedforward=2048,
                  dropout=0.1,
-                 layer_norm_eps=1e-5,
-                 num_experts=4,
-                 gating_noise=0.0):
+                 layer_norm_eps=1e-5):
         super().__init__()
         self.self_attn = CustomMultiHeadAttention(d_model, nhead, dropout=dropout)
 
-        self.feed_forward = MoEFeedForwardSoft(
+        # Replace the MoE feed-forward with a standard feed-forward
+        self.feed_forward = StandardFeedForward(
             d_model=d_model,
             dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            num_experts=num_experts,
-            gating_noise=gating_noise
+            dropout=dropout
         )
 
         self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
@@ -669,19 +762,25 @@ class CustomTransformerEncoderMoELayer(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
 
     def forward(self, src, src_mask=None, src_key_padding_mask=None, stoich_frac=None):
-        # 1) Self-attention with stoichiometric bias
+        """
+        src: [B, T, d_model]
+        src_mask: optional attention mask
+        src_key_padding_mask: optional padding mask
+        stoich_frac: optional fraction for stoichiometric bias
+        """
+        # 1) Self-attention
         attn_out = self.self_attn(
             query=src,
             key=src,
             value=src,
             key_padding_mask=src_key_padding_mask,
             attn_mask=src_mask,
-            stoich_frac=stoich_frac  # <--- pass in stoich_frac here
+            stoich_frac=stoich_frac
         )
         src = src + self.dropout1(attn_out)
         src = self.norm1(src)
 
-        # 2) MoE feed-forward
+        # 2) Standard feed-forward
         ff_out = self.feed_forward(src)
         src = src + self.dropout2(ff_out)
         src = self.norm2(src)
@@ -689,11 +788,10 @@ class CustomTransformerEncoderMoELayer(nn.Module):
         return src
 
 
-
-
-class CustomTransformerEncoderMoE(nn.Module):
+class CustomTransformerEncoder(nn.Module):
     def __init__(self, encoder_layer, num_layers):
         super().__init__()
+        # Just store references to `encoder_layer` for each layer
         self.layers = nn.ModuleList([encoder_layer for _ in range(num_layers)])
 
     def forward(self, src, mask=None, src_key_padding_mask=None, stoich_frac=None):
@@ -703,7 +801,7 @@ class CustomTransformerEncoderMoE(nn.Module):
                 output,
                 src_mask=mask,
                 src_key_padding_mask=src_key_padding_mask,
-                stoich_frac=stoich_frac  # pass down
+                stoich_frac=stoich_frac
             )
         return output
 
@@ -722,7 +820,7 @@ import torch.nn as nn
 # Reuse the same fraction encoders, embedder, etc. from your original code
 # Reuse the same CustomMultiHeadAttention from your previous custom attention code
 
-class EncoderMoE(nn.Module):
+class Encoder(nn.Module):
     def __init__(self,
                  d_model,
                  N,
@@ -765,16 +863,15 @@ class EncoderMoE(nn.Module):
         self.pos_scaler_log = nn.parameter.Parameter(torch.tensor([1.]))
 
         if self.attention:
-            encoder_layer = CustomTransformerEncoderMoELayer(
+            encoder_layer = CustomTransformerEncoderLayer(
                 d_model=self.d_model,
                 nhead=self.heads,
                 dim_feedforward=1024,
                 dropout=0.1,
                 layer_norm_eps=1e-5,
-                num_experts=num_experts,
-                gating_noise=gating_noise
+ 
             )
-            self.transformer_encoder = CustomTransformerEncoderMoE(
+            self.transformer_encoder = CustomTransformerEncoder(
                 encoder_layer=encoder_layer,
                 num_layers=self.N
             )
@@ -827,13 +924,12 @@ class Madani(nn.Module):
         self.heads = heads
         self.compute_device = compute_device
 
-        self.encoder = EncoderMoE(
+        self.encoder = Encoder(
             d_model=self.d_model,
             N=self.N,
             heads=self.heads,
             compute_device=self.compute_device,
-            num_experts=num_experts,
-            gating_noise=gating_noise
+
         )
 
         if residual_nn == 'roost':
