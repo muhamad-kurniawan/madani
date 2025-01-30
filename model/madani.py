@@ -654,7 +654,7 @@ class CustomTransformerEncoderMoELayer(nn.Module):
         super().__init__()
         self.self_attn = CustomMultiHeadAttention(d_model, nhead, dropout=dropout)
 
-        self.feed_forward = MoEFeedForwardTop1(
+        self.feed_forward = MoEFeedForwardTop2(
             d_model=d_model,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
