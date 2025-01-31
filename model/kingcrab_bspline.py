@@ -264,17 +264,26 @@ class Encoder(nn.Module):
 
         # --- Replace or supplement the old FractionalEncoder with B-spline: ---
         # B-spline versions for "linear frac" and "log frac"
-        self.pe  = BSplineEncoder(d_model//2,
-                                            n_basis=10,
-                                            degree=3,
+        # self.pe  = BSplineEncoder(d_model//2,
+        #                                     n_basis=10,
+        #                                     degree=3,
+        #                                     log10=False,
+        #                                     compute_device=self.compute_device)
+        # self.ple = BSplineEncoder(d_model//2,
+        #                                     n_basis=10,
+        #                                     degree=3,
+        #                                     log10=True,
+        #                                     compute_device=self.compute_device)
+
+        self.pe = FractionalEncoder(d_model//2,
+                                            resolution=5000,
                                             log10=False,
                                             compute_device=self.compute_device)
-        self.ple = BSplineEncoder(d_model//2,
-                                            n_basis=10,
-                                            degree=3,
+        self.ple = FractionalEncoder(d_model//2,
+                                            resolution=5000,
                                             log10=True,
                                             compute_device=self.compute_device)
-
+                     
         self.emb_scaler = nn.parameter.Parameter(torch.tensor([1.]))
         self.pos_scaler = nn.parameter.Parameter(torch.tensor([1.]))
         self.pos_scaler_log = nn.parameter.Parameter(torch.tensor([1.]))
