@@ -455,7 +455,7 @@ class CustomTransformerEncoderMoELayer(nn.Module):
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             num_experts=num_experts,
-            gating_noise=gating_noise
+            # gating_noise=gating_noise
         )
 
         # Layer norms
