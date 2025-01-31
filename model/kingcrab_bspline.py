@@ -275,14 +275,14 @@ class Encoder(nn.Module):
         #                                     log10=True,
         #                                     compute_device=self.compute_device)
 
-        self.pe = FractionalEncoder(d_model//2,
-                                            resolution=5000,
-                                            log10=False,
-                                            compute_device=self.compute_device)
-        self.ple = FractionalEncoder(d_model//2,
-                                            resolution=5000,
-                                            log10=True,
-                                            compute_device=self.compute_device)
+        # self.pe = FractionalEncoder(d_model//2,
+        #                                     resolution=5000,
+        #                                     log10=False,
+        #                                     compute_device=self.compute_device)
+        # self.ple = FractionalEncoder(d_model//2,
+        #                                     resolution=5000,
+        #                                     log10=True,
+        #                                     compute_device=self.compute_device)
                      
         self.emb_scaler = nn.parameter.Parameter(torch.tensor([1.]))
         self.pos_scaler = nn.parameter.Parameter(torch.tensor([1.]))
@@ -319,19 +319,19 @@ class Encoder(nn.Module):
         ple_embedding = self.ple(frac) * ple_scaler
 
         # combine them into [B, T, d_model]
-        # x_src = torch.zeros_like(x)
-        # x_src[:, :, :self.d_model//2] = pe_embedding
-        # x_src[:, :, self.d_model//2:] = ple_embedding
+        x_src = torch.zeros_like(x)
+        x_src[:, :, :self.d_model//2] = pe_embedding
+        x_src[:, :, self.d_model//2:] = ple_embedding
 
-        pe = torch.zeros_like(x)
-        ple = torch.zeros_like(x)
-        pe[:, :, :self.d_model//2] = pe_embedding
-        ple[:, :, self.d_model//2:] = ple_embedding
+        # pe = torch.zeros_like(x)
+        # ple = torch.zeros_like(x)
+        # pe[:, :, :self.d_model//2] = pe_embedding
+        # ple[:, :, self.d_model//2:] = ple_embedding
 
         # pass through transformer (if enabled)
         if self.attention:
-            x_src = x + pe + ple
-            # x_src = x_src.transpose(0, 1)   # shape => [T, B, d_model]
+            # x_src = x + pe + ple
+            x_src = x_src.transpose(0, 1)   # shape => [T, B, d_model]
             x = self.transformer_encoder(x_src, src_key_padding_mask=src_mask)
             x = x.transpose(0, 1)          # shape => [B, T, d_model]
         else:
