@@ -798,19 +798,19 @@ class CustomTransformerEncoderMoELayer(nn.Module):
         super().__init__()
         self.self_attn = CustomMultiHeadAttention(d_model, nhead, dropout=dropout)
 
-        # self.feed_forward = MoEFeedForwardTop2(
-        #     d_model=d_model,
-        #     dim_feedforward=dim_feedforward,
-        #     dropout=dropout,
-        #     num_experts=num_experts,
-        #     gating_noise=gating_noise
-        # )
-        self.feed_forward = HashRouterMoEFeedForward(
+        self.feed_forward = MoEFeedForwardTop1(
             d_model=d_model,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
-            num_experts=num_experts
-)
+            num_experts=num_experts,
+            gating_noise=gating_noise
+        )
+#         self.feed_forward = HashRouterMoEFeedForward(
+#             d_model=d_model,
+#             dim_feedforward=dim_feedforward,
+#             dropout=dropout,
+#             num_experts=num_experts
+# )
 
         self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
         self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
