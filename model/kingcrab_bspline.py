@@ -323,6 +323,8 @@ class Encoder(nn.Module):
         # x_src[:, :, :self.d_model//2] = pe_embedding
         # x_src[:, :, self.d_model//2:] = ple_embedding
 
+        pe = torch.zero_like(x)
+        ple = torch.zero_like(x)
         pe[:, :, :self.d_model//2] = pe_embedding
         ple[:, :, self.d_model//2:] = ple_embedding
 
