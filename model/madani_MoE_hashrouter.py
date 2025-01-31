@@ -716,6 +716,75 @@ class HashRouterMoEFeedForward(nn.Module):
 
         return out
 
+class HashRouterMoEFeedForward(nn.Module):
+    """
+    MoE feed-forward module with a hash-based router (single-expert).
+    Each token is routed to exactly one expert based on a simple hash of a learned routing key.
+    """
+    def __init__(self, 
+                 d_model, 
+                 dim_feedforward=2048, 
+                 dropout=0.1, 
+                 num_experts=4):
+        """
+        Args:
+            d_model (int): Model embedding dimension.
+            dim_feedforward (int): Hidden size in each expert's FFN.
+            dropout (float): Dropout probability.
+            num_experts (int): Number of parallel experts.
+        """
+        super().__init__()
+        self.num_experts = num_experts
+
+        # A linear layer to produce a routing key: (d_model -> 1)
+        # We'll cast it to an integer for hashing.
+        self.router_key = nn.Linear(d_model, 1)
+
+        # Experts: each is a feed-forward block: d_model -> dim_feedforward -> d_model
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, dim_feedforward),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(dim_feedforward, d_model),
+                nn.Dropout(dropout),
+            )
+            for _ in range(num_experts)
+        ])
+
+    def forward(self, x):
+        """
+        x: [B, T, d_model]
+        Returns: [B, T, d_model]
+        """
+        B, T, d = x.shape
+
+        # 1) Compute routing keys: shape [B, T, 1]
+        routing_keys = self.router_key(x)
+
+        # 2) Convert to integer hash
+        #    We'll just round and cast to int as a naive “hash”.
+        #    Then mod by num_experts to get expert ID for each token.
+        #    (For real apps, you may want a stronger hash function.)
+        routing_keys_rounded = torch.floor(routing_keys.squeeze(-1)).to(torch.int64)  # [B, T]
+        expert_idx = torch.remainder(routing_keys_rounded, self.num_experts)         # [B, T]
+
+        # 3) Create output buffer
+        out = torch.zeros_like(x)
+
+        # 4) Dispatch tokens to each expert
+        for e_idx in range(self.num_experts):
+            mask = (expert_idx == e_idx)  # [B, T]
+            if mask.any():
+                # Gather tokens assigned to expert e_idx
+                selected_x = x[mask]  # shape [N, d_model]
+                # Forward pass in that expert
+                expert_out = self.experts[e_idx](selected_x)
+
+                # Scatter back
+                out[mask] = expert_out
+
+        return out
 
 class CustomTransformerEncoderMoELayer(nn.Module):
     def __init__(self, 
@@ -737,10 +806,10 @@ class CustomTransformerEncoderMoELayer(nn.Module):
         #     gating_noise=gating_noise
         # )
         self.feed_forward = HashRouterMoEFeedForward(
-        d_model=d_model,
-        dim_feedforward=dim_feedforward,
-        dropout=dropout,
-        num_experts=num_experts
+            d_model=d_model,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            num_experts=num_experts
 )
 
         self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
