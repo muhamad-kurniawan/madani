@@ -319,13 +319,17 @@ class Encoder(nn.Module):
         ple_embedding = self.ple(frac) * ple_scaler
 
         # combine them into [B, T, d_model]
-        x_src = torch.zeros_like(x)
-        x_src[:, :, :self.d_model//2] = pe_embedding
-        x_src[:, :, self.d_model//2:] = ple_embedding
+        # x_src = torch.zeros_like(x)
+        # x_src[:, :, :self.d_model//2] = pe_embedding
+        # x_src[:, :, self.d_model//2:] = ple_embedding
+
+        pe[:, :, :self.d_model//2] = pe_embedding
+        ple[:, :, self.d_model//2:] = ple_embedding
 
         # pass through transformer (if enabled)
         if self.attention:
-            x_src = x_src.transpose(0, 1)   # shape => [T, B, d_model]
+            x_src = x + pe + ple
+            # x_src = x_src.transpose(0, 1)   # shape => [T, B, d_model]
             x = self.transformer_encoder(x_src, src_key_padding_mask=src_mask)
             x = x.transpose(0, 1)          # shape => [B, T, d_model]
         else:
