@@ -479,9 +479,9 @@ class Madani(nn.Module):
             self.output_nn = ResidualNetwork(self.d_model, self.out_dims, self.out_hidden)
 
         self.token_gater = nn.Sequential(
-            nn.Linear(self.out_dims, 32),
+            nn.Linear(self.out_dims, 128),
             nn.ReLU(),
-            nn.Linear(32, 1)  # one scalar per token
+            nn.Linear(128, 1)  # one scalar per token
         )
     def forward(self, src, frac):
         output = self.encoder(src, frac)
