@@ -288,6 +288,7 @@ class CustomTransformerEncoderMixedLastMoE(nn.Module):
                  selection_threshold=0.1):
         super().__init__()
         self.layers = nn.ModuleList()
+        # Create N-1 standard layers
         for _ in range(num_layers - 1):
             self.layers.append(
                 CustomTransformerEncoderFFLayer(
@@ -296,9 +297,11 @@ class CustomTransformerEncoderMixedLastMoE(nn.Module):
                     dim_feedforward=dim_feedforward,
                     dropout=dropout,
                     layer_norm_eps=layer_norm_eps,
-                    selection_threshold=selection_threshold
+                    # Pass selection_threshold if needed by dynamic attention module
+                    # (if your standard layer uses DynamicMultiHeadAttention)
                 )
             )
+        # Create 1 MoE layer for the LAST layer
         if num_layers > 0:
             self.layers.append(
                 CustomTransformerEncoderMoELayer(
@@ -314,15 +317,15 @@ class CustomTransformerEncoderMixedLastMoE(nn.Module):
             )
 
     def forward(self, src, mask=None, src_key_padding_mask=None):
+        total_aux_loss = 0.0
         out = src
         for layer in self.layers:
-            out = layer(out, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
-        return out
+            # Unpack each layer's tuple output.
+            out, aux_loss = layer(out, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
+            total_aux_loss += aux_loss
+        return out, total_aux_loss
 
 
-###############################################################################
-# Encoder MoE - uses last layer as MoE and returns auxiliary loss (dummy here).
-###############################################################################
 class EncoderMoE(nn.Module):
     """
     Encoder that uses an MoE approach only on the LAST layer.
@@ -366,26 +369,29 @@ class EncoderMoE(nn.Module):
         # Fractional encodings
         pe = torch.zeros_like(x)
         ple = torch.zeros_like(x)
+
         pe_scaler = 2**((1 - self.pos_scaler)**2)
         ple_scaler = 2**((1 - self.pos_scaler_log)**2)
+
         pe[:, :, :self.d_model//2] = self.pe(frac) * pe_scaler
         ple[:, :, self.d_model//2:] = self.ple(frac) * ple_scaler
 
         if self.attention:
             x_src = x + pe + ple
-            x = self.transformer_encoder(
+            x, aux_loss = self.transformer_encoder(
                 x_src,
                 mask=None,
                 src_key_padding_mask=src_key_padding_mask
             )
+        else:
+            aux_loss = 0.0
+
         if self.fractional:
             x = x * frac.unsqueeze(2).repeat(1, 1, self.d_model)
 
-        # Zero out any padding positions
         hmask = (frac == 0).unsqueeze(-1).repeat(1, 1, self.d_model)
         x = x.masked_fill(hmask, 0)
-        return x
-
+        return x  # You can choose to return aux_loss if needed.
 
 ###############################################################################
 # Madani Model
