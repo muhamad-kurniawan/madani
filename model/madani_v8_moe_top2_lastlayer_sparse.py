@@ -233,6 +233,59 @@ class CustomTransformerEncoderMoELayer(nn.Module):
         src = self.norm2(src)
         return src
 
+class MoEFeedForwardTop2(nn.Module):
+    """
+    MoE feed-forward module with top-2 gating.
+    """
+    def __init__(self, 
+                 d_model, 
+                 dim_feedforward=2048, 
+                 dropout=0.1, 
+                 num_experts=4, 
+                 gating_noise=0.0):
+        super().__init__()
+        self.num_experts = num_experts
+        self.gating_noise = gating_noise
+
+        self.gate = nn.Linear(d_model, num_experts)
+
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, dim_feedforward),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(dim_feedforward, d_model),
+                nn.Dropout(dropout)
+            )
+            for _ in range(num_experts)
+        ])
+
+    def forward(self, x):
+        B, T, d = x.shape
+        gating_logits = self.gate(x)  # [B, T, num_experts]
+
+        if self.training and self.gating_noise > 0.0:
+            noise = torch.randn_like(gating_logits) * self.gating_noise
+            gating_logits = gating_logits + noise
+
+        gating_scores = F.softmax(gating_logits, dim=-1)
+        top2_scores, top2_experts = gating_scores.topk(2, dim=-1)
+
+        out = torch.zeros_like(x)
+
+        for rank in range(2):
+            expert_idx = top2_experts[..., rank]    # [B, T]
+            gating_weight = top2_scores[..., rank]  # [B, T]
+            for e_idx in range(self.num_experts):
+                mask = (expert_idx == e_idx)
+                if mask.any():
+                    selected_x = x[mask]
+                    expert_out = self.experts[e_idx](selected_x)
+                    weight = gating_weight[mask].unsqueeze(-1)  # [N, 1]
+                    out[mask] += weight * expert_out
+
+        return out
+
 
 ###############################################################################
 # Mixed Encoder: First N-1 layers are standard, last layer is MoE.
