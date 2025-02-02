@@ -19,18 +19,13 @@ class ResidualNetwork(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_layer_dims):
         super(ResidualNetwork, self).__init__()
         dims = [input_dim] + hidden_layer_dims
-        self.fcs = nn.ModuleList([
-            nn.Linear(dims[i], dims[i + 1])
-            for i in range(len(dims) - 1)
-        ])
-        self.res_fcs = nn.ModuleList([
-            nn.Linear(dims[i], dims[i + 1], bias=False)
-            if dims[i] != dims[i + 1] else nn.Identity()
-            for i in range(len(dims) - 1)
-        ])
-        self.acts = nn.ModuleList([
-            nn.LeakyReLU() for _ in range(len(dims) - 1)
-        ])
+        self.fcs = nn.ModuleList([nn.Linear(dims[i], dims[i+1])
+                                  for i in range(len(dims)-1)])
+        self.res_fcs = nn.ModuleList([nn.Linear(dims[i], dims[i+1], bias=False)
+                                      if dims[i] != dims[i+1]
+                                      else nn.Identity()
+                                      for i in range(len(dims)-1)])
+        self.acts = nn.ModuleList([nn.LeakyReLU() for _ in range(len(dims)-1)])
         self.fc_out = nn.Linear(dims[-1], output_dim)
 
     def forward(self, fea):
@@ -58,7 +53,7 @@ class Embedder(nn.Module):
         zeros = np.zeros((1, feat_size))
         cat_array = np.concatenate([zeros, cbfv])
         cat_array = torch.as_tensor(cat_array, dtype=data_type_torch)
-        self.cbfv = nn.Embedding.from_pretrained(cat_array) \
+        self.cbfv = nn.Embedding.from_pretrained(cat_array)\
             .to(self.compute_device, dtype=data_type_torch)
 
     def forward(self, src):
@@ -98,74 +93,19 @@ class FractionalEncoder(nn.Module):
         out = self.pe[frac_idx]  # [B, T, d_model//2]
         return out
 
-class MoEFeedForwardTop2(nn.Module):
-    """
-    MoE feed-forward module with top-2 gating.
-    """
-    def __init__(self, 
-                 d_model, 
-                 dim_feedforward=2048, 
-                 dropout=0.1, 
-                 num_experts=4, 
-                 gating_noise=0.0):
-        super().__init__()
-        self.num_experts = num_experts
-        self.gating_noise = gating_noise
-
-        self.gate = nn.Linear(d_model, num_experts)
-
-        self.experts = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(d_model, dim_feedforward),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(dim_feedforward, d_model),
-                nn.Dropout(dropout)
-            )
-            for _ in range(num_experts)
-        ])
-
-    def forward(self, x):
-        B, T, d = x.shape
-        gating_logits = self.gate(x)  # [B, T, num_experts]
-
-        if self.training and self.gating_noise > 0.0:
-            noise = torch.randn_like(gating_logits) * self.gating_noise
-            gating_logits = gating_logits + noise
-
-        gating_scores = F.softmax(gating_logits, dim=-1)
-        top2_scores, top2_experts = gating_scores.topk(2, dim=-1)
-
-        out = torch.zeros_like(x)
-
-        for rank in range(2):
-            expert_idx = top2_experts[..., rank]    # [B, T]
-            gating_weight = top2_scores[..., rank]  # [B, T]
-            for e_idx in range(self.num_experts):
-                mask = (expert_idx == e_idx)
-                if mask.any():
-                    selected_x = x[mask]
-                    expert_out = self.experts[e_idx](selected_x)
-                    weight = gating_weight[mask].unsqueeze(-1)  # [N, 1]
-                    out[mask] += weight * expert_out
-
-        return out
 
 ###############################################################################
-# New: Dynamic (Adaptive) Multi-Head Attention with Sparse (Dynamic Token) Selection
+# New: Dynamic (Adaptive) Multi-Head Attention with Dynamic Token Selection
 ###############################################################################
 class DynamicMultiHeadAttention(nn.Module):
-    """
-    A multi-head attention module that performs dynamic token selection.
-    For each query, keys with raw scores below a fixed threshold (selection_threshold)
-    are masked out before the softmax. This creates a sparse attention mechanism.
-    """
-    def __init__(self, d_model, nhead, dropout=0.1, selection_threshold=0.1):
+    def __init__(self, d_model, nhead, dropout=0.1, p_threshold=0.9, k_max=None):
         super().__init__()
         assert d_model % nhead == 0, "d_model must be divisible by nhead"
         self.d_model = d_model
         self.nhead = nhead
         self.head_dim = d_model // nhead
+        self.p_threshold = p_threshold
+        self.k_max = k_max if k_max is not None else d_model  # or use num_keys if available
 
         self.W_q = nn.Linear(d_model, d_model)
         self.W_k = nn.Linear(d_model, d_model)
@@ -173,57 +113,78 @@ class DynamicMultiHeadAttention(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
         self.scale = self.head_dim ** -0.5
-        self.selection_threshold = selection_threshold
 
     def forward(self, query, key, value, key_padding_mask=None, attn_mask=None):
-        B, T, _ = query.shape
-        Q = self.W_q(query)
-        K = self.W_k(key)
-        V = self.W_v(value)
+        B, T_q, _ = query.shape
+        T_k = key.shape[1]
 
-        Q = Q.view(B, T, self.nhead, self.head_dim).transpose(1,2)  # [B, nhead, T, head_dim]
-        K = K.view(B, T, self.nhead, self.head_dim).transpose(1,2)
-        V = V.view(B, T, self.nhead, self.head_dim).transpose(1,2)
+        # 1) Linear projections.
+        Q = self.W_q(query)  # [B, T_q, d_model]
+        K = self.W_k(key)    # [B, T_k, d_model]
+        V = self.W_v(value)  # [B, T_k, d_model]
 
-        scores = torch.matmul(Q, K.transpose(-1, -2)) * self.scale  # [B, nhead, T, T]
+        # 2) Reshape for multi-head.
+        Q = Q.view(B, T_q, self.nhead, self.head_dim).transpose(1, 2)  # [B, nhead, T_q, head_dim]
+        K = K.view(B, T_k, self.nhead, self.head_dim).transpose(1, 2)  # [B, nhead, T_k, head_dim]
+        V = V.view(B, T_k, self.nhead, self.head_dim).transpose(1, 2)  # [B, nhead, T_k, head_dim]
+
+        # 3) Compute raw attention scores.
+        scores = torch.matmul(Q, K.transpose(-1, -2)) * self.scale  # [B, nhead, T_q, T_k]
         if attn_mask is not None:
             scores = scores + attn_mask
         if key_padding_mask is not None:
             expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
             scores = scores.masked_fill(expanded_mask, float('-inf'))
 
-        # Dynamic token selection: mask out keys with scores below threshold.
-        mask = scores < self.selection_threshold
-        scores = scores.masked_fill(mask, float('-inf'))
+        # 4) Compute full softmax probabilities.
+        full_probs = F.softmax(scores, dim=-1)  # [B, nhead, T_q, T_k]
 
-        attn_probs = F.softmax(scores, dim=-1)
-        attn_probs = self.dropout(attn_probs)
+        # 5) For each query, sort the probabilities in descending order.
+        sorted_probs, sorted_indices = torch.sort(full_probs, dim=-1, descending=True)  # [B, nhead, T_q, T_k]
+        cumsum_probs = sorted_probs.cumsum(dim=-1)  # [B, nhead, T_q, T_k]
 
-        out = torch.matmul(attn_probs, V)  # [B, nhead, T, head_dim]
-        out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
+        # 6) Create a mask that selects keys until cumulative probability exceeds p_threshold.
+        mask_sorted = cumsum_probs <= self.p_threshold  # [B, nhead, T_q, T_k]
+        mask_sorted[..., 0] = True  # Ensure at least one key is selected.
+        if self.k_max is not None:
+            expert_range = torch.arange(T_k, device=query.device).view(1, 1, 1, T_k)
+            mask_sorted = mask_sorted & (expert_range < self.k_max)
+
+        # 7) Unsort the mask back to original order.
+        selection_mask = torch.zeros_like(mask_sorted, dtype=torch.bool)
+        selection_mask.scatter_(dim=-1, index=sorted_indices, src=mask_sorted)
+        
+        # 8) Mask out unselected keys in the scores.
+        dynamic_scores = scores.masked_fill(~selection_mask, float('-inf'))
+
+        # 9) Recompute softmax over the selected keys.
+        dynamic_probs = F.softmax(dynamic_scores, dim=-1)
+        dynamic_probs = self.dropout(dynamic_probs)
+
+        # 10) Compute attention output.
+        out = torch.matmul(dynamic_probs, V)  # [B, nhead, T_q, head_dim]
+        out = out.transpose(1, 2).contiguous().view(B, T_q, self.d_model)
         out = self.out_proj(out)
         return out
 
 
 ###############################################################################
-# Transformer Layers: Use DynamicMultiHeadAttention instead of the original attention.
+# Replace CustomMultiHeadAttention with DynamicMultiHeadAttention in transformer layers.
 ###############################################################################
 class CustomTransformerEncoderFFLayer(nn.Module):
     """
-    A standard Transformer Encoder layer with Dynamic Multi-Head Attention.
-    Returns (output, auxiliary_loss) where aux_loss is zero.
+    A standard Transformer Encoder layer that uses a regular feed-forward block.
+    Uses DynamicMultiHeadAttention for self-attention.
     """
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, layer_norm_eps=1e-5,
-                 selection_threshold=0.1):
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, layer_norm_eps=1e-5, p_threshold=0.9, k_max=None):
         super().__init__()
-        self.self_attn = DynamicMultiHeadAttention(d_model, nhead, dropout=dropout, 
-                                                     selection_threshold=selection_threshold)
+        self.self_attn = DynamicMultiHeadAttention(d_model, nhead, dropout=dropout, p_threshold=p_threshold, k_max=k_max)
         self.feed_forward = nn.Sequential(
             nn.Linear(d_model, dim_feedforward),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(dim_feedforward, d_model),
-            nn.Dropout(dropout),
+            nn.Dropout(dropout)
         )
         self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
         self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
@@ -231,30 +192,26 @@ class CustomTransformerEncoderFFLayer(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
 
     def forward(self, src, src_mask=None, src_key_padding_mask=None):
-        attn_out = self.self_attn(src, src, src,
-                                  key_padding_mask=src_key_padding_mask,
-                                  attn_mask=src_mask)
+        attn_out = self.self_attn(src, src, src, key_padding_mask=src_key_padding_mask, attn_mask=src_mask)
         src = src + self.dropout1(attn_out)
         src = self.norm1(src)
         ff_out = self.feed_forward(src)
         src = src + self.dropout2(ff_out)
         src = self.norm2(src)
-        return src, 0.0
+        return src
 
 
 class CustomTransformerEncoderMoELayer(nn.Module):
     """
-    A Transformer Encoder layer that uses MoE in its feed-forward block
-    and Dynamic Multi-Head Attention.
-    Returns (output, auxiliary_loss) from the MoE feed-forward.
+    A Transformer Encoder layer that uses MoE in its feed-forward block.
+    (MoE method remains unchanged.)
+    Uses DynamicMultiHeadAttention for self-attention.
     """
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
-                 layer_norm_eps=1e-5, num_experts=4, gating_noise=0.0,
-                 selection_threshold=0.1):
+                 layer_norm_eps=1e-5, num_experts=4, gating_noise=0.0, p_threshold=0.9, k_max=None):
         super().__init__()
-        self.self_attn = DynamicMultiHeadAttention(d_model, nhead, dropout=dropout,
-                                                     selection_threshold=selection_threshold)
-        # MOE feed-forward method remains unchanged (top-2 gating in this case)
+        self.self_attn = DynamicMultiHeadAttention(d_model, nhead, dropout=dropout, p_threshold=p_threshold, k_max=k_max)
+        # MoE feed-forward remains unchanged.
         self.feed_forward = MoEFeedForwardTop2(
             d_model=d_model,
             dim_feedforward=dim_feedforward,
@@ -268,9 +225,7 @@ class CustomTransformerEncoderMoELayer(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
 
     def forward(self, src, src_mask=None, src_key_padding_mask=None):
-        attn_out = self.self_attn(src, src, src,
-                                  key_padding_mask=src_key_padding_mask,
-                                  attn_mask=src_mask)
+        attn_out = self.self_attn(src, src, src, key_padding_mask=src_key_padding_mask, attn_mask=src_mask)
         src = src + self.dropout1(attn_out)
         src = self.norm1(src)
         ff_out = self.feed_forward(src)
@@ -284,11 +239,11 @@ class CustomTransformerEncoderMoELayer(nn.Module):
 ###############################################################################
 class CustomTransformerEncoderMixedLastMoE(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
-                 layer_norm_eps=1e-5, num_experts=4, gating_noise=0.0, num_layers=3,
-                 selection_threshold=0.1):
+                 layer_norm_eps=1e-5, num_experts=4, gating_noise=0.0, num_layers=3, p_threshold=0.9, k_max=None):
         super().__init__()
         self.layers = nn.ModuleList()
-        # Create N-1 standard layers
+
+        # Create N-1 standard layers using DynamicMultiHeadAttention.
         for _ in range(num_layers - 1):
             self.layers.append(
                 CustomTransformerEncoderFFLayer(
@@ -297,11 +252,12 @@ class CustomTransformerEncoderMixedLastMoE(nn.Module):
                     dim_feedforward=dim_feedforward,
                     dropout=dropout,
                     layer_norm_eps=layer_norm_eps,
-                    # Pass selection_threshold if needed by dynamic attention module
-                    # (if your standard layer uses DynamicMultiHeadAttention)
+                    p_threshold=p_threshold,
+                    k_max=k_max
                 )
             )
-        # Create 1 MoE layer for the LAST layer
+
+        # Create 1 MoE layer for the LAST layer.
         if num_layers > 0:
             self.layers.append(
                 CustomTransformerEncoderMoELayer(
@@ -312,27 +268,27 @@ class CustomTransformerEncoderMixedLastMoE(nn.Module):
                     layer_norm_eps=layer_norm_eps,
                     num_experts=num_experts,
                     gating_noise=gating_noise,
-                    selection_threshold=selection_threshold
+                    p_threshold=p_threshold,
+                    k_max=k_max
                 )
             )
 
     def forward(self, src, mask=None, src_key_padding_mask=None):
-        total_aux_loss = 0.0
         out = src
         for layer in self.layers:
-            # Unpack each layer's tuple output.
-            out, aux_loss = layer(out, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
-            total_aux_loss += aux_loss
-        return out, total_aux_loss
+            out = layer(out, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
+        return out
 
 
+###############################################################################
+# Encoder MoE - uses MoE only in the LAST layer and returns auxiliary loss.
+###############################################################################
 class EncoderMoE(nn.Module):
     """
     Encoder that uses an MoE approach only on the LAST layer.
     """
     def __init__(self, d_model, N, heads, frac=False, attn=True,
-                 compute_device=None, num_experts=4, gating_noise=0.0,
-                 selection_threshold=0.1):
+                 compute_device=None, num_experts=4, gating_noise=0.0, p_threshold=0.9, k_max=None):
         super().__init__()
         self.d_model = d_model
         self.N = N
@@ -359,7 +315,8 @@ class EncoderMoE(nn.Module):
                 num_experts=num_experts,
                 gating_noise=gating_noise,
                 num_layers=self.N,
-                selection_threshold=selection_threshold
+                p_threshold=p_threshold,
+                k_max=k_max
             )
 
     def forward(self, src, frac):
@@ -369,7 +326,6 @@ class EncoderMoE(nn.Module):
         # Fractional encodings
         pe = torch.zeros_like(x)
         ple = torch.zeros_like(x)
-
         pe_scaler = 2**((1 - self.pos_scaler)**2)
         ple_scaler = 2**((1 - self.pos_scaler_log)**2)
 
@@ -378,28 +334,25 @@ class EncoderMoE(nn.Module):
 
         if self.attention:
             x_src = x + pe + ple
-            x, aux_loss = self.transformer_encoder(
+            x = self.transformer_encoder(
                 x_src,
                 mask=None,
                 src_key_padding_mask=src_key_padding_mask
             )
-        else:
-            aux_loss = 0.0
-
         if self.fractional:
             x = x * frac.unsqueeze(2).repeat(1, 1, self.d_model)
 
         hmask = (frac == 0).unsqueeze(-1).repeat(1, 1, self.d_model)
         x = x.masked_fill(hmask, 0)
-        return x  # You can choose to return aux_loss if needed.
+        return x
+
 
 ###############################################################################
 # Madani Model
 ###############################################################################
 class Madani(nn.Module):
     def __init__(self, out_dims=3, d_model=512, N=3, heads=4, compute_device=None,
-                 residual_nn='roost', num_experts=4, gating_noise=0.1,
-                 selection_threshold=0.1):
+                 residual_nn='roost', num_experts=4, gating_noise=0.1, p_threshold=0.9, k_max=None):
         super().__init__()
         self.avg = True
         self.out_dims = out_dims
@@ -415,7 +368,8 @@ class Madani(nn.Module):
             compute_device=self.compute_device,
             num_experts=num_experts,
             gating_noise=gating_noise,
-            selection_threshold=selection_threshold
+            p_threshold=p_threshold,
+            k_max=k_max
         )
 
         if residual_nn == 'roost':
