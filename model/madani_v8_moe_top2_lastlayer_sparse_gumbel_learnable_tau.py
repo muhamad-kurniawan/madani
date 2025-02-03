@@ -175,7 +175,7 @@ class DiffSelectMultiHeadAttention(nn.Module):
         Q = self.W_q(query)  # [B, T, d_model]
         K = self.W_k(key)
         V = self.W_v(value)
-        Q = Q.view(B, T, self.nhead, self.head_dim).transpose(1, 2)  # [B, nhead, T, head_dim]
+        Q = Q.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
         K = K.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
         V = V.view(B, T, self.nhead, self.head_dim).transpose(1, 2)
         scores = torch.matmul(Q, K.transpose(-1, -2)) * self.scale  # [B, nhead, T, T]
@@ -184,15 +184,16 @@ class DiffSelectMultiHeadAttention(nn.Module):
         if key_padding_mask is not None:
             expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
             scores = scores.masked_fill(expanded_mask, float('-inf'))
-        # Compute effective temperature (ensure positivity)
-        tau = torch.exp(self.log_tau)
-        # Use Gumbel-softmax for differentiable selection
+        # Clamp the log_tau to keep tau in a stable range.
+        tau = torch.exp(torch.clamp(self.log_tau, min=-5, max=1))
+        # Use Gumbel-softmax for differentiable selection.
         probs = F.gumbel_softmax(scores, tau=tau, hard=False, dim=-1)
         probs = self.dropout(probs)
         out = torch.matmul(probs, V)  # [B, nhead, T, head_dim]
         out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
         out = self.out_proj(out)
         return out
+
 
 
 ###############################################################################
