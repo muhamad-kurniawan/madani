@@ -187,10 +187,10 @@ class DiffSelectMultiHeadAttention(nn.Module):
             expanded_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
             scores = scores.masked_fill(expanded_mask, float('-inf'))
         # Clamp the log_tau to keep tau in a stable range.
-        tau2 = torch.clamp(self.tau2, min=0.1, max=0.1)
-        print(f'tau:{tau2.item()}')
+        tau2 = torch.clamp(self.tau2, min=0.1, max=0.15)
+        # print(f'tau:{tau2.item()}')
         # Use Gumbel-softmax for differentiable selection.
-        probs = F.gumbel_softmax(scores, tau=self.tau, hard=False, dim=-1)
+        probs = F.gumbel_softmax(scores, tau=tau2.item(), hard=False, dim=-1)
         probs = self.dropout(probs)
         out = torch.matmul(probs, V)  # [B, nhead, T, head_dim]
         out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
