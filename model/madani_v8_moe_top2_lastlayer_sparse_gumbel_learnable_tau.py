@@ -162,7 +162,9 @@ class DiffSelectMultiHeadAttention(nn.Module):
         self.head_dim = d_model // nhead
         # Instead of a fixed tau, we learn log_tau to ensure positivity.
         # self.log_tau = nn.Parameter(torch.log(torch.tensor(tau, dtype=torch.float32)))
-        self.tau2 = nn.Parameter(torch.tensor(tau, dtype=torch.float32))
+        # self.tau2 = nn.Parameter(torch.tensor(tau, dtype=torch.float32))
+        
+        self.tau2 = nn.Parameter(torch.randn(1,dtype=torch.float32) )
         self.tau = torch.tensor(tau, dtype=torch.float32)
         
         self.W_q = nn.Linear(d_model, d_model)
