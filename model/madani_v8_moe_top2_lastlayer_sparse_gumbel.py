@@ -336,7 +336,7 @@ class EncoderMoE(nn.Module):
             self.transformer_encoder = CustomTransformerEncoderMixedLastMoE(
                 d_model=self.d_model,
                 nhead=self.heads,
-                dim_feedforward=1024,
+                dim_feedforward=1536,
                 dropout=0.1,
                 layer_norm_eps=1e-5,
                 num_experts=num_experts,
