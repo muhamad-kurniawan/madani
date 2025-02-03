@@ -315,7 +315,7 @@ class EncoderMoE(nn.Module):
     Encoder that uses an MoE approach only on the LAST layer.
     """
     def __init__(self, d_model, N, heads, frac=False, attn=True,
-                 compute_device=None, num_experts=4, gating_noise=0.0, tau=0.1):
+                 compute_device=None, num_experts=4, gating_noise=0.0, tau=0.2):
         super().__init__()
         self.d_model = d_model
         self.N = N
