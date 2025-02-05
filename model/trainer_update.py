@@ -24,7 +24,7 @@ class ModelTrainer:
                  drop_unary=True,
                  scale=True):
 
-        self.model = modelf
+        self.model = model
         self.model_name = model_name
         self.data_loader = None      
         self.train_loader = None     
