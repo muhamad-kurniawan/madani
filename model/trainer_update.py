@@ -287,6 +287,9 @@ class ModelTrainer:
             loader_test = loader_test.get_data_loaders(inference=True)
         # print(f'loader predict shape {loader.dataset[0].shape}')
         len_dataset = len(loader_test.dataset)
+
+        if len_dataset == 0:
+            raise ValueError("The DataLoader is empty. Ensure data is loaded correctly.")
         # Each sample is [n_elements, 2]. E.g. if shape = [n_elements, 2].
         # n_atoms = int(len(loader_test.dataset[0][0]) / 2)
         n_atoms = int(len(loader_test.dataset[0][0]))
