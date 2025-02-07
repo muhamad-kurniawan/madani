@@ -271,7 +271,7 @@ class ModelTrainer:
             self.optimizer.swap_swa_sgd()
 
 
-    def predict(self, loader):
+    def predict(self, loader_test):
         """
         Runs inference on a given DataLoader. Returns:
         (act, pred, formulae, uncert).
