@@ -284,7 +284,7 @@ class ModelTrainer:
                                      verbose=self.verbose,
                                      drop_unary=self.drop_unary,
                                      scale=self.scale)
-            loader_test = loader_test.get_data_loaders(inference=True)
+            loader_test = loader_test.get_data_loaders(inference=False)
         # print(f'loader predict shape {loader.dataset[0].shape}')
         len_dataset = len(loader_test.dataset)
         # Each sample is [n_elements, 2]. E.g. if shape = [n_elements, 2].
