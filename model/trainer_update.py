@@ -276,7 +276,7 @@ class ModelTrainer:
         Runs inference on a given DataLoader. Returns:
         (act, pred, formulae, uncert).
         """
-        if isinstance(loader, str):
+        if isinstance(loader_test, str):
             loader_test = DataHandler(loader,
                                      batch_size=64,
                                      n_elements=self.n_elements,
