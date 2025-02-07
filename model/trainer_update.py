@@ -277,18 +277,19 @@ class ModelTrainer:
         (act, pred, formulae, uncert).
         """
         if isinstance(loader, str):
-            loader = DataHandler(loader,
+            loader_test = DataHandler(loader,
                                      batch_size=64,
                                      n_elements=self.n_elements,
                                      inference=True,
                                      verbose=self.verbose,
                                      drop_unary=self.drop_unary,
                                      scale=self.scale)
+            loader_test = loader_test.get_data_loaders(inference=True)
         # print(f'loader predict shape {loader.dataset[0].shape}')
-        len_dataset = len(loader.dataset)
+        len_dataset = len(loader_test.dataset)
         # Each sample is [n_elements, 2]. E.g. if shape = [n_elements, 2].
-        # n_atoms = int(len(loader.dataset[0][0]) / 2)
-        n_atoms = int(len(loader.dataset[0][0]))
+        # n_atoms = int(len(loader_test.dataset[0][0]) / 2)
+        n_atoms = int(len(loader_test.dataset[0][0]))
 
         act = np.zeros(len_dataset)
         pred = np.zeros(len_dataset)
@@ -301,7 +302,7 @@ class ModelTrainer:
 
         self.model.eval()
         with torch.no_grad():
-            for i, data in enumerate(loader):
+            for i, data in enumerate(loader_test):
                 
                 X, y, formula = data
 
