@@ -265,5 +265,5 @@ if __name__ == '__main__':
     # Example: Use CrabNet with global feature selection on the embedding.
     # Let's assume the input dimension (after embedding) is d_model=512.
     # We want to keep, for example, 300 features (indices) globally.
-    model = CrabNet(out_dims=3, d_model=512, N=3, heads=4, feature_selector_k=300)
+    model = CrabNet(out_dims=3, d_model=512, N=3, heads=4, feature_selector_k=30)
     print(model)
