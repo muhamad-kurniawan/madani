@@ -194,16 +194,17 @@ class Encoder(nn.Module):
                  heads,
                  frac=False,
                  attn=True,
-                 compute_device=None):
+                 compute_device=None, selector_k=None):
         super().__init__()
         self.d_model = d_model
         self.N = N
         self.heads = heads
         self.fractional = frac
         self.attention = attn
+        self.selector_k = selector_k
         self.compute_device = compute_device
         self.embed = Embedder(d_model=self.d_model,
-                              compute_device=self.compute_device)
+                              compute_device=self.compute_device, selector_k=self.selector_k)
         self.pe = FractionalEncoder(self.d_model, resolution=5000, log10=False)
         self.ple = FractionalEncoder(self.d_model, resolution=5000, log10=True)
 
@@ -258,18 +259,19 @@ class CrabNet(nn.Module):
                  N=3,
                  heads=4,
                  compute_device=None,
-                 residual_nn='roost'):
+                 residual_nn='roost', feature_selector_k=None):
         super().__init__()
         self.avg = True
         self.out_dims = out_dims
         self.d_model = d_model
         self.N = N
         self.heads = heads
+        self.selector_k = feature_selector_k
         self.compute_device = compute_device
         self.encoder = Encoder(d_model=self.d_model,
                                N=self.N,
                                heads=self.heads,
-                               compute_device=self.compute_device)
+                               compute_device=self.compute_device, selector_k=self.selector_k)
         if residual_nn == 'roost':
             # use the Roost residual network
             self.out_hidden = [1024, 512, 256, 128]
