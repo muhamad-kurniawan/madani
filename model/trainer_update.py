@@ -8,8 +8,8 @@ from torch.optim.lr_scheduler import CyclicLR
 from sklearn.metrics import mean_absolute_error, roc_auc_score
 
 from madani.utils.scaling import Scaler, DummyScaler
-from madani.utils.optims import RobustL1, BCEWithLogitsLoss
-from madani.utils.optims import Lamb, Lookahead, SWA
+from madani.utils.optims_update import RobustL1, BCEWithLogitsLoss
+from madani.utils.optims_update import Lamb, Lookahead, SWA
 from madani.utils.utils import count_parameters, get_compute_device
 from madani.utils.input_processing import DataHandler, data_type_torch
 
