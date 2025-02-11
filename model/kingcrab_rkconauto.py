@@ -60,8 +60,8 @@ class Embedder(nn.Module):
 
         elem_dir = 'madani/data/element_properties'
         mat2vec = f'{elem_dir}/mat2vec.csv'  # element embedding
-        mat2vec = f'{elem_dir}/oliynyk.csv'
-        mat2vec = f'{elem_dir}/jarvis.csv'
+        # mat2vec = f'{elem_dir}/oliynyk.csv'
+        # mat2vec = f'{elem_dir}/jarvis.csv'
         cbfv = pd.read_csv(mat2vec, index_col=0).values
         feat_size = cbfv.shape[-1]
         self.fc_mat2vec = nn.Linear(feat_size, d_model).to(self.compute_device)
