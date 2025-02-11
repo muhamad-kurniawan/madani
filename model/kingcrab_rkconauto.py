@@ -63,7 +63,8 @@ class Embedder(nn.Module):
         mat2vec = f'{elem_dir}/onehot.csv'
         # mat2vec = f'{elem_dir}/oliynyk.csv'
         # mat2vec = f'{elem_dir}/jarvis.csv'
-        cbfv = pd.read_csv(mat2vec, index_col=0).values
+        cbfv = pd.read_csv(mat2vec, index_col=0)
+        cbfv = ((cbfv-cbfv.mean())/cbfv.std()).values
         feat_size = cbfv.shape[-1]
         self.fc_mat2vec = nn.Linear(feat_size, d_model).to(self.compute_device)
         zeros = np.zeros((1, feat_size))
