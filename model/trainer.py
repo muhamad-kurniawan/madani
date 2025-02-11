@@ -272,7 +272,7 @@ class ModelTrainer:
                     train_str = f'train auc: {train_auc:0.3f}'
                     val_str = f'val auc: {val_auc:0.3f}'
 
-                print(epoch_str, train_str, val_str)
+                # print(epoch_str, train_str, val_str)
 
                 # SWA plotting
                 if self.epoch >= (self.epochs_step * self.swa_start - 1):
