@@ -103,7 +103,8 @@ class Embedder(nn.Module):
         self.compute_device = compute_device
 
         elem_dir = 'madani/data/element_properties'
-        mat2vec = f'{elem_dir}/mat2vec.csv'  # element embedding file
+        # mat2vec = f'{elem_dir}/mat2vec.csv'  # element embedding file
+        mat2vec = f'{elem_dir}/onehot.csv'
         cbfv = pd.read_csv(mat2vec, index_col=0).values
         self.feat_size = cbfv.shape[-1]
         
