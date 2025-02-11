@@ -62,7 +62,7 @@ class Embedder(nn.Module):
         mat2vec = f'{elem_dir}/mat2vec.csv'  # element embedding
         mat2vec = f'{elem_dir}/onehot.csv'
         # mat2vec = f'{elem_dir}/oliynyk.csv'
-        # mat2vec = f'{elem_dir}/jarvis.csv'
+        mat2vec = f'{elem_dir}/jarvis.csv'
         cbfv = pd.read_csv(mat2vec, index_col=0)
         # cbfv = ((cbfv-cbfv.mean())/cbfv.std()).values
         cbfv = ((cbfv-cbfv.min())/(cbfv.max()-cbfv.min())).values
