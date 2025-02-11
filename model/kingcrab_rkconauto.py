@@ -63,7 +63,7 @@ class Embedder(nn.Module):
         mat2vec = f'{elem_dir}/onehot.csv'
         # mat2vec = f'{elem_dir}/oliynyk.csv'
         # mat2vec = f'{elem_dir}/magpie.csv'
-        # mat2vec = f'{elem_dir}/jarvis.csv'
+        mat2vec = f'{elem_dir}/jarvis.csv'
         
         # cbfv = pd.read_csv(mat2vec, index_col=0).values
         cbfv = pd.read_csv(mat2vec, index_col=0)
