@@ -111,6 +111,8 @@ class Embedder(nn.Module):
         # mat2vec = f'{elem_dir}/oliynyk_2024.csv'
         cbfv = pd.read_csv(mat2vec, index_col=0, encoding= 'unicode_escape').values
         self.feat_size = cbfv.shape[-1]
+
+        print(f'feat_sizes :{self.feat_size})
         
         # Create a global feature selector to be applied on the raw element features.
         # If selector_k is provided, it will select that many features.
