@@ -93,6 +93,7 @@ class GlobalRankedFeatureSelector(nn.Module):
     
     def hard_mask(self):
         kth_value = torch.topk(self.logits, self.k)[0][-1]
+        print(self.logits[:2])
         return (self.logits >= kth_value).float()
 
 # %%
