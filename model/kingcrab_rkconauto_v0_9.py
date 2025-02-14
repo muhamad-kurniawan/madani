@@ -81,7 +81,7 @@ class GlobalRankedFeatureSelector(nn.Module):
         # Compute soft probabilities via Gumbel–Sigmoid relaxation
         soft_probs = torch.sigmoid((self.logits + noise) / self.current_temp)
 
-        print(self.logits[:20])
+        # print(self.logits[:20])
         
         # Use the ranking rule: find the k-th highest value as threshold
         kth_value = torch.topk(soft_probs, self.k)[0][-1]
