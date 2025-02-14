@@ -256,7 +256,7 @@ class Encoder(nn.Module):
         hmask = mask[:, :, 0:1].repeat(1, 1, self.d_model)
         if mask is not None:
             x = x.masked_fill(hmask == 0, 0)
-
+        print(f'emb_scaler{self.emb_scaler}')
         return x
 
 
