@@ -300,6 +300,7 @@ class ModelTrainer:
                     plt.legend()
                     plt.show()
 
+                    print(f'hard mask:{self.model.encoder.embed.feature_selector.hard_mask()}')
             # Early stopping if needed
             if self.optimizer.discard_count >= self.discard_n:
                 print(f'Discarded: {self.optimizer.discard_count}/'
