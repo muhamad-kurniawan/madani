@@ -64,7 +64,7 @@ class GlobalRankedFeatureSelector(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.k = k
-        self.logits = nn.Parameter(torch.zeros(input_dim))
+        self.logits = nn.parameter.Parameter(torch.zeros(input_dim))
         self.init_temp = init_temp
         self.final_temp = final_temp
         self.current_temp = init_temp
@@ -256,7 +256,7 @@ class Encoder(nn.Module):
         hmask = mask[:, :, 0:1].repeat(1, 1, self.d_model)
         if mask is not None:
             x = x.masked_fill(hmask == 0, 0)
-        print(f'emb_scaler{self.emb_scaler}')
+        # print(f'emb_scaler{self.emb_scaler}')
         return x
 
 
