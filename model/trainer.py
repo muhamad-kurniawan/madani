@@ -227,7 +227,7 @@ class ModelTrainer:
             # measure training speed
             dt = time() - ti
             datalen = len(self.train_loader.dataset)
-            # print(f'Training speed: {datalen/dt:0.3f} samples/sec')
+            print(f'Training speed: {datalen/dt:0.3f} samples/sec')
 
             # If SWA didn't see improvements, increment discard count
             if learning_time and not any(minima):
@@ -272,7 +272,7 @@ class ModelTrainer:
                     train_str = f'train auc: {train_auc:0.3f}'
                     val_str = f'val auc: {val_auc:0.3f}'
 
-                # print(epoch_str, train_str, val_str)
+                print(epoch_str, train_str, val_str)
 
                 # SWA plotting
                 if self.epoch >= (self.epochs_step * self.swa_start - 1):
