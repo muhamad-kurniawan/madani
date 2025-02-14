@@ -80,6 +80,9 @@ class GlobalRankedFeatureSelector(nn.Module):
         noise = -torch.log(-torch.log(torch.rand_like(self.logits) + 1e-20) + 1e-20)
         # Compute soft probabilities via Gumbel–Sigmoid relaxation
         soft_probs = torch.sigmoid((self.logits + noise) / self.current_temp)
+
+        print(soft_prob[:20])
+        
         # Use the ranking rule: find the k-th highest value as threshold
         kth_value = torch.topk(soft_probs, self.k)[0][-1]
         # Create binary mask: features with probability >= kth_value are kept
