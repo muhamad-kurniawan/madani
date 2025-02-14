@@ -238,6 +238,8 @@ class ModelTrainer:
             # Reset minima for next epoch
             minima.clear()
 
+            self.model.encoder.embed.update_temperature(epoch, epochs)
+
             # ---- END of inline `train()` code ----
 
             # Still in epoch loop: capture attention every epoch if set
