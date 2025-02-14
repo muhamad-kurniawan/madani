@@ -238,7 +238,7 @@ class ModelTrainer:
             # Reset minima for next epoch
             minima.clear()
 
-            self.model.encoder.embed.feature_selector.update_temperature(epoch*0.1, epochs)
+            self.model.encoder.embed.feature_selector.update_temperature(epoch*0.1, epochs*0.1)
 
             # ---- END of inline `train()` code ----
 
