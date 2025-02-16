@@ -57,9 +57,6 @@ class ModelTrainer:
         if self.capture_every is not None:
             print(f'Capturing attention tensors every {self.capture_every}')
 
-        for name, param in model.named_parameters():
-            print(name)
-
     def load_data(self, file_name, batch_size=2**9, train=False):
 
         self.batch_size = batch_size
@@ -242,6 +239,11 @@ class ModelTrainer:
             minima.clear()
 
             self.model.encoder.embed.feature_selector.update_temperature(epoch, epochs)
+
+                
+            for name, param in self.model.named_parameters():
+                if "logits" in name:
+                    print(f"{name} grad norm:", param.grad.norm().item() if param.grad is not None else None)
 
             # ---- END of inline `train()` code ----
 
