@@ -49,22 +49,23 @@ class ResidualNetwork(nn.Module):
 class GlobalRankedFeatureSelector(nn.Module):
     """
     Global feature selector that learns a mask over the feature dimension.
-    It uses a binary concrete (Gumbel–Sigmoid) relaxation with a ranking rule
-    to retain only the top-k features. This mask is applied uniformly across
-    all tokens.
+    Uses a binary concrete (Gumbel–Sigmoid) relaxation to produce soft probabilities,
+    which are then used as a mask. During training, the soft mask is used to allow gradients
+    to flow back to self.logits.
     """
     def __init__(self, input_dim, k, init_temp=5.0, final_temp=0.1):
         """
         Args:
             input_dim (int): Number of features per token.
-            k (int): Number of features to keep.
+            k (int): Target number of features to keep (used for inference).
             init_temp (float): Initial temperature.
             final_temp (float): Final temperature.
         """
         super().__init__()
         self.input_dim = input_dim
         self.k = k
-        self.logits = nn.Parameter(torch.zeros(input_dim, requires_grad=True))
+        # Initialize logits with small random values to break symmetry
+        self.logits = nn.Parameter(torch.randn(input_dim) * 0.01)
         self.init_temp = init_temp
         self.final_temp = final_temp
         self.current_temp = init_temp
@@ -74,30 +75,25 @@ class GlobalRankedFeatureSelector(nn.Module):
         Args:
             x: Tensor of shape [B, T, input_dim]
         Returns:
-            Tensor of shape [B, T, input_dim] with unselected features zeroed out.
+            x_masked: Tensor of shape [B, T, input_dim] after applying a soft mask.
         """
-        # Sample Gumbel noise for each feature (shape: [input_dim])
+        # Sample Gumbel noise for each feature
         noise = -torch.log(-torch.log(torch.rand_like(self.logits) + 1e-20) + 1e-20)
-        # Compute soft probabilities via Gumbel–Sigmoid relaxation
+        # Compute soft probabilities using the Gumbel–Sigmoid relaxation
         soft_probs = torch.sigmoid((self.logits + noise) / self.current_temp)
-        
-        # Use the ranking rule: find the k-th highest value as threshold
-        kth_value = torch.topk(soft_probs, self.k)[0][-1]
-        # Compute a hard mask (non-differentiable)
-        hard_mask = (soft_probs >= kth_value).float()  # Shape: [input_dim]
-        # Use straight-through estimator: forward uses hard_mask,
-        # but backward uses soft_probs' gradient.
-        mask = hard_mask.detach() - soft_probs.detach() + soft_probs
-        mask = mask.view(1, 1, self.input_dim)  # Expand for broadcasting
+        # Use the soft probabilities directly as the mask so gradients flow.
+        mask = soft_probs.view(1, 1, self.input_dim)
         return x * mask
 
     def update_temperature(self, epoch, total_epochs):
-        # Exponential annealing schedule for the temperature
+        # Exponential annealing schedule for temperature
         self.current_temp = self.init_temp * ((self.final_temp / self.init_temp) ** (epoch / total_epochs))
     
     def hard_mask(self):
+        # For inference: compute a hard mask by thresholding the logits
         kth_value = torch.topk(self.logits, self.k)[0][-1]
         return (self.logits >= kth_value).float()
+
 
 
 # %%
