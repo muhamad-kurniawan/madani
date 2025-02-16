@@ -57,6 +57,9 @@ class ModelTrainer:
         if self.capture_every is not None:
             print(f'Capturing attention tensors every {self.capture_every}')
 
+        for name, param in model.named_parameters():
+            print(name)
+
     def load_data(self, file_name, batch_size=2**9, train=False):
 
         self.batch_size = batch_size
