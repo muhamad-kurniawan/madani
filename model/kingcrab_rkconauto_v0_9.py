@@ -82,6 +82,7 @@ class GlobalRankedFeatureSelector(nn.Module):
         soft_probs = torch.sigmoid((self.logits + noise) / self.current_temp)
 
         # print(self.logits[:20])
+        print(f'logits grad: {self.logits.grad}')
         
         # Use the ranking rule: find the k-th highest value as threshold
         kth_value = torch.topk(soft_probs, self.k)[0][-1]
@@ -96,7 +97,7 @@ class GlobalRankedFeatureSelector(nn.Module):
     
     def hard_mask(self):
         kth_value = torch.topk(self.logits, self.k)[0][-1]
-        print(self.logits[:20])
+        # print(self.logits[:20])
         return (self.logits >= kth_value).float()
 
 # %%
