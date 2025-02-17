@@ -96,7 +96,7 @@ class GlobalRankedFeatureSelector(nn.Module):
 
     def update_temperature(self, epoch, total_epochs, feature_selection_phase):
         # Exponential annealing schedule.
-        if feature_selection_phase*total_epoch<=epoch:
+        if feature_selection_phase*total_epochs<=epoch:
             self.current_temp = self.init_temp * ((self.final_temp / self.init_temp) ** (epoch / total_epochs))
         else:
             self.current_temp = 0
