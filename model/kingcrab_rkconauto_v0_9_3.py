@@ -53,7 +53,7 @@ class GlobalRankedFeatureSelector(nn.Module):
     then uses a straight-through estimator so that the forward pass applies a hard mask
     (retaining only the top-k features) while gradients flow as if the mask were soft.
     """
-    def __init__(self, input_dim, k, init_temp=5.0, final_temp=0.1):
+    def __init__(self, input_dim, k, init_temp=5.0, final_temp=0.01):
         """
         Args:
             input_dim (int): Number of features per token.
