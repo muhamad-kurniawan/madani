@@ -84,7 +84,7 @@ class ModelTrainer:
             self.train_loader = data_loader
         self.data_loader = data_loader
 
-    def fit(self, epochs=None, checkin=None, losscurve=False, discard_n=10):
+    def fit(self, epochs=None, checkin=None, losscurve=False, discard_n=10, feature_selection_phase=0.5):
     
         # Safety checks
         assert self.train_loader is not None, "Please load training data."
@@ -190,7 +190,7 @@ class ModelTrainer:
 
             # Update the temperature of feature selector
             if self.model.encoder.embed.feature_selector is not None:
-                self.model.encoder.embed.feature_selector.update_temperature(epoch, epochs)
+                self.model.encoder.embed.feature_selector.update_temperature(epoch, epochs, feature_selection_phase)
 
             self.lr_list.append(self.optimizer.param_groups[0]['lr'])
             if (epoch+1) % checkin == 0 or epoch == epochs - 1 or epoch == 0:
