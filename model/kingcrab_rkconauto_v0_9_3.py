@@ -96,10 +96,10 @@ class GlobalRankedFeatureSelector(nn.Module):
 
     def update_temperature(self, epoch, total_epochs, feature_selection_phase):
         # Exponential annealing schedule.
-        if feature_selection_phase*total_epochs<=epoch:
+        if feature_selection_phase*total_epochs>=epoch:
             self.current_temp = self.init_temp * ((self.final_temp / self.init_temp) ** (epoch / total_epochs))
         else:
-            self.current_temp = 0
+            self.current_temp = 1e-6
     def hard_mask(self):
         k_effective = min(self.k, self.logits.numel())
         kth_value = torch.topk(self.logits, k_effective)[0][-1].detach()
