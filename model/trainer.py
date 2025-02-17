@@ -208,9 +208,9 @@ class ModelTrainer:
                 loss.backward()
                 self.optimizer.step()
 
-                for name, param in self.model.named_parameters():
-                    if "logits" in name:
-                        print(f"{name} grad norm:", param.grad.norm().item() if param.grad is not None else None)
+                # for name, param in self.model.named_parameters():
+                #     if "logits" in name:
+                #         print(f"{name} grad norm:", param.grad.norm().item() if param.grad is not None else None)
                 
                 self.optimizer.zero_grad()
 
