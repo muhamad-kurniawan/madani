@@ -209,6 +209,10 @@ class ModelTrainer:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
+                for name, param in self.model.named_parameters():
+                    if "logits" in name:
+                        print(f"{name} grad norm:", param.grad.norm().item() if param.grad is not None else None)
+
                 # If using cyclical LR
                 if self.stepping:
                     self.lr_scheduler.step()
@@ -240,10 +244,6 @@ class ModelTrainer:
 
             self.model.encoder.embed.feature_selector.update_temperature(epoch, epochs)
 
-                
-            for name, param in self.model.named_parameters():
-                if "logits" in name:
-                    print(f"{name} grad norm:", param.grad.norm().item() if param.grad is not None else None)
 
             # ---- END of inline `train()` code ----
 
