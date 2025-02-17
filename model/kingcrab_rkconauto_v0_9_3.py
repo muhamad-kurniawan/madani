@@ -94,10 +94,12 @@ class GlobalRankedFeatureSelector(nn.Module):
         mask = mask.view(1, 1, self.input_dim)  # Expand for broadcasting.
         return x * mask
 
-    def update_temperature(self, epoch, total_epochs):
+    def update_temperature(self, epoch, total_epochs, feature_selection_phase):
         # Exponential annealing schedule.
-        self.current_temp = self.init_temp * ((self.final_temp / self.init_temp) ** (epoch / total_epochs))
-    
+        if feature_selection_phase*total_epoch<=epoch:
+            self.current_temp = self.init_temp * ((self.final_temp / self.init_temp) ** (epoch / total_epochs))
+        else:
+            self.current_temp = 0
     def hard_mask(self):
         k_effective = min(self.k, self.logits.numel())
         kth_value = torch.topk(self.logits, k_effective)[0][-1].detach()
