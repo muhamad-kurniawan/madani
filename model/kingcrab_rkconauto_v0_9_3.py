@@ -117,7 +117,7 @@ class Embedder(nn.Module):
         mat2vec = f'{elem_dir}/magpie.csv'
         mat2vec = f'{elem_dir}/jarvis.csv'
         # mat2vec = f'{elem_dir}/oliynyk.csv'
-        # mat2vec = f'{elem_dir}/oliynyk_2024.csv'
+        mat2vec = f'{elem_dir}/oliynyk_2024.csv'
         # mat2vec = f'{elem_dir}/data_test.csv'
         cbfv = pd.read_csv(mat2vec, index_col=0, encoding= 'unicode_escape').values
         self.feat_size = cbfv.shape[-1]
