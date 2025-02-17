@@ -99,7 +99,7 @@ class GlobalRankedFeatureSelector(nn.Module):
         if feature_selection_phase*total_epochs>=epoch:
             self.current_temp = self.init_temp * ((self.final_temp / self.init_temp) ** (epoch / total_epochs))
         else:
-            self.current_temp = 1e-6
+            self.current_temp = 1e-12
     def hard_mask(self):
         k_effective = min(self.k, self.logits.numel())
         kth_value = torch.topk(self.logits, k_effective)[0][-1].detach()
