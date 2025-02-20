@@ -134,7 +134,7 @@ class Embedder(nn.Module):
         self.feat_size = cbfv.shape[-1]
 
         # If the number of rows is less than 98, fill the missing rows with random numbers.
-        required_rows = 118
+        required_rows = 120
         current_rows = cbfv.shape[0]
         if current_rows < required_rows:
             missing = required_rows - current_rows
