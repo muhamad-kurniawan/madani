@@ -151,7 +151,16 @@ class Embedder(nn.Module):
         cat_array = torch.as_tensor(cat_array, dtype=data_type_torch)
         self.cbfv = nn.Embedding.from_pretrained(cat_array) \
             .to(self.compute_device, dtype=data_type_torch)
-
+        
+    def forward(self, src):
+        # Obtain raw element features [B, T, feat_size]
+        x = self.cbfv(src)
+        # Apply the global feature selector before projection, if provided.
+        if self.feature_selector is not None:
+            x = self.feature_selector(x)
+        # Project the (masked) features to the d_model space.
+        x_emb = self.fc_mat2vec(x)
+        return x_emb
 
 
 # %%
