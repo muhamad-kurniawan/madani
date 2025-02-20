@@ -117,9 +117,9 @@ class Embedder(nn.Module):
         mat2vec = f'{elem_dir}/mat2vec.csv'  # element embedding file
         # mat2vec = f'{elem_dir}/onehot.csv'
         # mat2vec = f'{elem_dir}/magpie.csv'
-        # mat2vec = f'{elem_dir}/jarvis.csv'
+        mat2vec = f'{elem_dir}/jarvis.csv'
         # mat2vec = f'{elem_dir}/oliynyk.csv'
-        mat2vec = f'{elem_dir}/oliynyk_2024.csv'
+        # mat2vec = f'{elem_dir}/oliynyk_2024.csv'
         # mat2vec = f'{elem_dir}/data_test.csv'
 
         # Load the mat2vec CSV file into a numpy array.
