@@ -115,8 +115,8 @@ class Embedder(nn.Module):
 
         elem_dir = 'madani/data/element_properties'
         mat2vec = f'{elem_dir}/mat2vec.csv'  # element embedding file
-        mat2vec = f'{elem_dir}/oliynyk.csv'
-        mat2vec = f'{elem_dir}/jarvis.csv'
+        # mat2vec = f'{elem_dir}/oliynyk.csv'
+        # mat2vec = f'{elem_dir}/jarvis.csv'
 
         # Load the mat2vec CSV file into a pandas DataFrame.
         df = pd.read_csv(mat2vec, index_col=0, encoding='unicode_escape')
