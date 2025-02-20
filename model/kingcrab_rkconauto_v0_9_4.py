@@ -115,15 +115,22 @@ class Embedder(nn.Module):
 
         elem_dir = 'madani/data/element_properties'
         mat2vec = f'{elem_dir}/mat2vec.csv'  # element embedding file
-        # mat2vec = f'{elem_dir}/onehot.csv'
-        # mat2vec = f'{elem_dir}/magpie.csv'
+        mat2vec = f'{elem_dir}/oliynyk.csv'
         mat2vec = f'{elem_dir}/jarvis.csv'
-        # mat2vec = f'{elem_dir}/oliynyk.csv'
-        # mat2vec = f'{elem_dir}/oliynyk_2024.csv'
-        # mat2vec = f'{elem_dir}/data_test.csv'
 
-        # Load the mat2vec CSV file into a numpy array.
-        cbfv = pd.read_csv(mat2vec, index_col=0, encoding='unicode_escape').values
+        # Load the mat2vec CSV file into a pandas DataFrame.
+        df = pd.read_csv(mat2vec, index_col=0, encoding='unicode_escape')
+        
+        # Check for NaN values and replace them with random numbers.
+        if df.isnull().values.any():
+            print("NaN values detected in CSV. Filling them with random numbers.")
+            # Create a DataFrame of random numbers with the same shape.
+            random_fill = pd.DataFrame(np.random.randn(*df.shape), 
+                                       index=df.index, 
+                                       columns=df.columns)
+            df = df.fillna(random_fill)
+        
+        cbfv = df.values
         self.feat_size = cbfv.shape[-1]
 
         # If the number of rows is less than 98, fill the missing rows with random numbers.
@@ -151,6 +158,7 @@ class Embedder(nn.Module):
         cat_array = torch.as_tensor(cat_array, dtype=data_type_torch)
         self.cbfv = nn.Embedding.from_pretrained(cat_array) \
             .to(self.compute_device, dtype=data_type_torch)
+
         
     def forward(self, src):
         # Obtain raw element features [B, T, feat_size]
