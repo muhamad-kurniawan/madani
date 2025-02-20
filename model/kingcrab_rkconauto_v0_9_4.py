@@ -139,7 +139,7 @@ class Embedder(nn.Module):
         if current_rows < required_rows:
             missing = required_rows - current_rows
             print(f"mat2vec has only {current_rows} rows. Filling {missing} missing rows with random numbers.")
-            random_fill = np.random.randn(missing, self.feat_size)
+            random_fill = abs(np.random.randn(missing, self.feat_size))
             cbfv = np.concatenate([cbfv, random_fill], axis=0)
 
         print(f'feat_sizes : {self.feat_size}')
