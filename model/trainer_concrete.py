@@ -166,7 +166,7 @@ class ModelTrainer:
                                       uncertainty.reshape(-1),
                                       y.reshape(-1))
                 lambda_entropy = 0.1
-                penalty = lambda_entropy * model.encoder.embed.feature_selector.entropy_penalty
+                penalty = lambda_entropy * self.model.encoder.embed.feature_selector.entropy_penalty
 
                 loss = loss + penalty
                 loss.backward()
