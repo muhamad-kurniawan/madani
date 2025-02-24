@@ -189,9 +189,9 @@ class ModelTrainer:
             minima.clear()
 
             # Update the temperature of feature selector
-            # if self.model.encoder.embed.feature_selector is not None:
-            #     self.model.encoder.embed.feature_selector.update_temperature(epoch, epochs, feature_selection_phase)
-            #     # self.model.encoder.embed.feature_selector.update_temperature(epoch, epochs)
+            if self.model.encoder.embed.feature_selector is not None:
+                self.model.encoder.embed.feature_selector.update_temperature(epoch, epochs, feature_selection_phase)
+                # self.model.encoder.embed.feature_selector.update_temperature(epoch, epochs)
 
             self.lr_list.append(self.optimizer.param_groups[0]['lr'])
             if (epoch+1) % checkin == 0 or epoch == epochs - 1 or epoch == 0:
@@ -229,8 +229,8 @@ class ModelTrainer:
                     plt.show()
 
                     # At checkin time, print the hard mask from the feature selector.
-                    # if hasattr(self.model.encoder.embed, 'feature_selector'):
-                    #     print(f'hard mask: {self.model.encoder.embed.feature_selector.hard_mask()}')
+                    if hasattr(self.model.encoder.embed, 'feature_selector'):
+                        print(f'hard mask: {self.model.encoder.embed.feature_selector.hard_mask()}')
             if self.optimizer.discard_count >= self.discard_n:
                 print(f'Early stopping: Discarded {self.optimizer.discard_count}/{self.discard_n} weight updates.')
                 self.optimizer.swap_swa_sgd()
@@ -258,11 +258,11 @@ class ModelTrainer:
         # Define a new forward method that applies the hard mask.
         def embed_hard(src):
             x = self.model.encoder.embed.cbfv(src)
-            # if self.model.encoder.embed.feature_selector is not None:
-            #     # Get the hard mask (shape: [feat_size]) and expand it.
-            #     hard = self.model.encoder.embed.feature_selector.hard_mask().to(self.compute_device)
-            #     hard = hard.view(1, 1, -1)
-            #     x = x * hard
+            if self.model.encoder.embed.feature_selector is not None:
+                # Get the hard mask (shape: [feat_size]) and expand it.
+                hard = self.model.encoder.embed.feature_selector.hard_mask().to(self.compute_device)
+                hard = hard.view(1, 1, -1)
+                x = x * hard
             x_emb = self.model.encoder.embed.fc_mat2vec(x)
             return x_emb
 
