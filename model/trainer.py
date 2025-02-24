@@ -190,8 +190,8 @@ class ModelTrainer:
 
             # Update the temperature of feature selector
             if self.model.encoder.embed.feature_selector is not None:
-                # self.model.encoder.embed.feature_selector.update_temperature(epoch, epochs, feature_selection_phase)
-                self.model.encoder.embed.feature_selector.update_temperature(epoch, epochs)
+                self.model.encoder.embed.feature_selector.update_temperature(epoch, epochs, feature_selection_phase)
+                # self.model.encoder.embed.feature_selector.update_temperature(epoch, epochs)
 
             self.lr_list.append(self.optimizer.param_groups[0]['lr'])
             if (epoch+1) % checkin == 0 or epoch == epochs - 1 or epoch == 0:
