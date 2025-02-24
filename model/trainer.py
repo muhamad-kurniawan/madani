@@ -258,11 +258,11 @@ class ModelTrainer:
         # Define a new forward method that applies the hard mask.
         def embed_hard(src):
             x = self.model.encoder.embed.cbfv(src)
-            if self.model.encoder.embed.feature_selector is not None:
-                # Get the hard mask (shape: [feat_size]) and expand it.
-                hard = self.model.encoder.embed.feature_selector.hard_mask().to(self.compute_device)
-                hard = hard.view(1, 1, -1)
-                x = x * hard
+            # if self.model.encoder.embed.feature_selector is not None:
+            #     # Get the hard mask (shape: [feat_size]) and expand it.
+            #     hard = self.model.encoder.embed.feature_selector.hard_mask().to(self.compute_device)
+            #     hard = hard.view(1, 1, -1)
+            #     x = x * hard
             x_emb = self.model.encoder.embed.fc_mat2vec(x)
             return x_emb
 
