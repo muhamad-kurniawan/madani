@@ -165,7 +165,7 @@ class ModelTrainer:
                 loss = self.criterion(prediction.reshape(-1),
                                       uncertainty.reshape(-1),
                                       y.reshape(-1))
-                lambda_entropy = 0.0001
+                lambda_entropy = 0.00005
                 penalty = lambda_entropy * self.model.encoder.embed.feature_selector.entropy_penalty
 
                 loss = loss + penalty
