@@ -229,8 +229,8 @@ class ModelTrainer:
                     plt.show()
 
                     # At checkin time, print the hard mask from the feature selector.
-                    if hasattr(self.model.encoder.embed, 'feature_selector'):
-                        print(f'hard mask: {self.model.encoder.embed.feature_selector.hard_mask()}')
+                    # if hasattr(self.model.encoder.embed, 'feature_selector'):
+                    #     print(f'hard mask: {self.model.encoder.embed.feature_selector.hard_mask()}')
             if self.optimizer.discard_count >= self.discard_n:
                 print(f'Early stopping: Discarded {self.optimizer.discard_count}/{self.discard_n} weight updates.')
                 self.optimizer.swap_swa_sgd()
