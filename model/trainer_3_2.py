@@ -172,7 +172,7 @@ class ModelTrainer:
         print("Stage 2: Training with gradual introduction of feature selection and penalties")
         # Re-enable the feature selector and set a modest scaling (e.g., 0.2)
         if hasattr(self.model.encoder.embed, 'selector_scale'):
-            self.model.encoder.embed.selector_scale = 0.2
+            self.model.encoder.embed.selector_scale = 0.5
 
         for epoch in range(stage1_epochs, stage1_epochs+stage2_epochs):
             self.epoch = epoch
