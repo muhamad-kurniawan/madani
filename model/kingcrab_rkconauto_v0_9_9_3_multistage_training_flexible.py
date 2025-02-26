@@ -109,7 +109,7 @@ class GlobalRankedFeatureSelector(torch.nn.Module):
     In flexible mode, rather than enforcing a fixed k, it uses a threshold based on
     a target fraction of features.
     """
-    def __init__(self, input_dim, k, flexible=False, init_temp=5.0, final_temp=0.01):
+    def __init__(self, input_dim, k, flexible=True, init_temp=5.0, final_temp=0.01):
         super().__init__()
         # k here can be interpreted as the desired number of features;
         # in flexible mode we convert that to a fraction.
