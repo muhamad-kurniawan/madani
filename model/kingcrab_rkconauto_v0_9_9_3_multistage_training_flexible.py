@@ -108,7 +108,7 @@ class GlobalRankedFeatureSelector(torch.nn.Module):
     Global feature selector that learns a mask over the feature dimension.
     In flexible mode, rather than enforcing a fixed k, it uses a learnable threshold.
     """
-    def __init__(self, input_dim, k, flexible=False, init_temp=5.0, final_temp=0.01):
+    def __init__(self, input_dim, k, flexible=True, init_temp=5.0, final_temp=0.01):
         super().__init__()
         assert k <= input_dim, f"Target k ({k}) must be <= input_dim ({input_dim})."
         self.input_dim = input_dim
