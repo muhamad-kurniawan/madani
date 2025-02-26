@@ -369,7 +369,7 @@ class ModelTrainer:
         self.model_name = checkpoint['model_name']
         print(f"Loaded network '{self.model_name}' from {path}")
 
-        if __name__ == '__main__':
+if __name__ == '__main__':
     # Assume CrabNet is defined elsewhere and uses the above Embedder.
     model = CrabNet(out_dims=3, d_model=512, N=3, heads=4, feature_selector_k=200)
     print(model)
