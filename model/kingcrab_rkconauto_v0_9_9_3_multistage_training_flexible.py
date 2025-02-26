@@ -115,10 +115,12 @@ class GlobalRankedFeatureSelector(torch.nn.Module):
         self.k = k
         self.flexible = flexible
         if self.flexible:
-            # Initialize a learnable threshold parameter.
-            # We parameterize it in logit space so that threshold = sigmoid(threshold_logit).
-            init_fraction = k / input_dim
-            init_logit = np.log(init_fraction / (1 - init_fraction))
+            if k < input_dim:
+                init_fraction = k / input_dim
+                init_logit = np.log(init_fraction / (1 - init_fraction))
+            else:
+                # If k equals input_dim, set threshold_logit to a very low value so that threshold is nearly 0.
+                init_logit = -10.0  # sigmoid(-10) ~ 4.5e-05, effectively selecting all features.
             self.threshold_logit = torch.nn.Parameter(torch.tensor(init_logit, dtype=torch.float32))
         else:
             self.target_fraction = k / input_dim  # fixed mode
@@ -136,7 +138,7 @@ class GlobalRankedFeatureSelector(torch.nn.Module):
         self.last_soft_probs = soft_probs  # store for use in penalty terms
 
         if self.flexible:
-            # Use the learnable threshold
+            # Use the learnable threshold.
             threshold = torch.sigmoid(self.threshold_logit)
             hard_mask = (soft_probs >= threshold).float()
         else:
@@ -145,13 +147,12 @@ class GlobalRankedFeatureSelector(torch.nn.Module):
             kth_value = torch.topk(soft_probs, k_effective)[0][-1].detach()
             hard_mask = (soft_probs >= kth_value).float()
 
-        # Use a straight-through estimator.
+        # Straight-through estimator.
         mask = hard_mask.detach() - soft_probs.detach() + soft_probs
         mask = mask.view(1, 1, self.input_dim)
         return x * mask
 
     def update_temperature(self, epoch, total_epochs=1000, feature_selection_phase=0.5):
-        # Exponential annealing schedule within the feature selection phase.
         if epoch < feature_selection_phase * total_epochs:
             self.current_temp = self.init_temp * ((self.final_temp / self.init_temp) ** (epoch / total_epochs))
         else:
@@ -165,6 +166,7 @@ class GlobalRankedFeatureSelector(torch.nn.Module):
             k_effective = min(self.k, self.logits.numel())
             kth_value = torch.topk(self.logits, k_effective)[0][-1].detach()
             return (self.logits >= kth_value).float()
+
 
 
 # %%
