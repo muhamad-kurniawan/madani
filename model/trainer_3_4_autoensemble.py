@@ -38,18 +38,22 @@ class ModelTrainer:
         self.drop_unary = drop_unary
         self.scale = scale
 
-        # Set device if not already set
+        # Set device
         if self.compute_device is None:
             self.compute_device = get_compute_device()
 
-        # Internal variables
+        # Internal flags/vars
         self.capture_flag = False
         self.formula_current = None
         self.act_v = None
         self.pred_v = None
 
-        # For Auto-Ensemble snapshots (to be captured adaptively)
+        # For Auto-Ensemble snapshots
         self.snapshots = []
+
+        # For recording checkin points (for plotting loss curves)
+        self.xswa = []
+        self.yswa = []
 
         if self.verbose:
             print('\nModel architecture: out_dims, d_model, N, heads')
@@ -74,15 +78,12 @@ class ModelTrainer:
 
         print(f'Loading data with up to {data_loaders.n_elements:0.0f} '
               f'elements in the formula')
-        # Update the n_elements in case it was inferred/adjusted
         self.n_elements = data_loaders.n_elements
 
-        # Grab the DataLoader
         data_loader = data_loaders.get_data_loaders(inference=inference)
         y = data_loader.dataset.y
         if train:
             self.train_len = len(y)
-            # Set up a scaler for regression or classification
             if self.classification:
                 self.scaler = DummyScaler(y)
             else:
@@ -92,48 +93,37 @@ class ModelTrainer:
 
     def fit(self, epochs=None, checkin=None, losscurve=False, adaptive_threshold=0.01):
         """
-        Trains the model using a cyclic learning rate scheduler.
+        Trains the model using a cyclic LR scheduler.
         At every checkin interval the validation MAE is computed.
         If the relative improvement over the best validation MAE is less than adaptive_threshold,
-        a snapshot of the model is captured (to be ensembled at inference).
+        a snapshot of the model is captured.
         """
-        # Safety checks
         assert self.train_loader is not None, "Please load training data."
         assert self.data_loader is not None, "Please load validation data."
 
-        # Tracking dictionaries for loss curves
         self.loss_curve = {'train': [], 'val': []}
-
-        # Set up stepping for LR scheduler: here we step after every epoch
         self.epochs_step = 1
         self.step_size = self.epochs_step * len(self.train_loader)
         print(f'Stepping every {self.step_size} training passes, cycling LR every {self.epochs_step} epochs')
 
-        # If epochs not specified, set a default number
         if epochs is None:
             n_iterations = 1e4
             epochs = int(n_iterations / len(self.data_loader))
             print(f'Running for {epochs} epochs')
 
-        # Checkin interval (e.g., every 2 epochs)
         if checkin is None:
             checkin = self.epochs_step * 2
             print(f'Checkin at {checkin} epochs to match LR scheduler')
 
-        # Initialize best validation error to infinity
         self.best_val = float('inf')
 
-        # Define loss function
         self.criterion = RobustL1
         if self.classification:
             print("Using BCE loss for classification task")
             self.criterion = BCEWithLogitsLoss
 
-        # Build optimizer using Lookahead over Lamb (no SWA here)
         base_optim = Lamb(params=self.model.parameters())
         self.optimizer = Lookahead(base_optimizer=base_optim)
-
-        # Set up a cyclical learning rate scheduler
         self.lr_scheduler = CyclicLR(self.optimizer,
                                      base_lr=1e-4,
                                      max_lr=6e-3,
@@ -141,47 +131,35 @@ class ModelTrainer:
                                      step_size_up=self.step_size)
         self.stepping = True
         self.lr_list = []
-        self.xswa = []  # used here to mark checkin epochs (if desired)
-        # Note: discard_n and SWA-specific logic have been removed.
 
-        # ---- TRAINING LOOP ----
         for epoch in range(epochs):
             self.epoch = epoch
-            self.epochs = epochs
-
             self.model.train()
             ti = time()
 
             for i, data in enumerate(self.train_loader):
                 X, y, formula = data
-                # Scale targets
                 y = self.scaler.scale(y)
 
                 src = X[:, :, 0]
                 frac = X[:, :, 1]
-
-                # Add random noise ("jitter") to fractions for robustness
                 frac = frac * (1 + (torch.randn_like(frac)) * self.fudge)
                 frac = torch.clamp(frac, 0, 1)
                 frac[src == 0] = 0
                 frac = frac / frac.sum(dim=1, keepdim=True)
 
-                # Move data to compute device
                 src = src.to(self.compute_device, dtype=torch.long, non_blocking=True)
                 frac = frac.to(self.compute_device, dtype=data_type_torch, non_blocking=True)
                 y = y.to(self.compute_device, dtype=data_type_torch, non_blocking=True)
 
-                # Optionally capture attention every step
                 if self.capture_every == 'step':
                     self.capture_flag = True
                     self.act_v, self.pred_v, _, _ = self.predict(self.data_loader)
                     self.capture_flag = False
 
-                # Forward pass
                 output = self.model.forward(src, frac)
                 prediction, uncertainty = output.chunk(2, dim=-1)
 
-                # Compute loss and backpropagation
                 loss = self.criterion(
                     prediction.reshape(-1),
                     uncertainty.reshape(-1),
@@ -191,22 +169,18 @@ class ModelTrainer:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-                # Step the cyclic LR scheduler after each batch
                 if self.stepping:
                     self.lr_scheduler.step()
 
             dt = time() - ti
 
-            # Optionally capture attention every epoch
             if self.capture_every == 'epoch':
                 self.capture_flag = True
                 self.act_v, self.pred_v, _, _ = self.predict(self.data_loader)
                 self.capture_flag = False
 
-            # Record LR value for analysis
             self.lr_list.append(self.optimizer.param_groups[0]['lr'])
 
-            # At checkin intervals, evaluate training/validation performance
             if (epoch+1) % checkin == 0 or epoch == epochs - 1 or epoch == 0:
                 with torch.no_grad():
                     act_t, pred_t, _, _ = self.predict(self.train_loader)
@@ -229,9 +203,11 @@ class ModelTrainer:
 
                 print(epoch_str, train_str, val_str)
 
-                # ---- AUTO-ENSEMBLE SNAPSHOT LOGIC ----
-                # If the validation error improvement is less than adaptive_threshold (relative to best so far),
-                # capture a snapshot.
+                # Record checkin points for plotting
+                self.xswa.append(epoch)
+                self.yswa.append(mae_v)
+
+                # Adaptive snapshot logic:
                 if self.best_val == float('inf'):
                     self.best_val = mae_v
                 else:
@@ -244,7 +220,6 @@ class ModelTrainer:
                     else:
                         self.best_val = mae_v
 
-                # Optionally plot loss curves
                 if losscurve:
                     plt.figure(figsize=(8, 5))
                     xval = np.arange(len(self.loss_curve['val'])) * checkin
@@ -275,7 +250,7 @@ class ModelTrainer:
                                  drop_unary=self.drop_unary,
                                  scale=self.scale)
         len_dataset = len(loader.dataset)
-        n_atoms = int(len(loader.dataset[0][0]))  # number of elements
+        n_atoms = int(len(loader.dataset[0][0]))
 
         act = np.zeros(len_dataset)
         pred = np.zeros(len_dataset)
@@ -289,14 +264,8 @@ class ModelTrainer:
         with torch.no_grad():
             for i, data in enumerate(loader):
                 X, y, formula = data
-
-                # If capturing attention, store current formulas
                 if self.capture_flag:
-                    self.formula_current = None
-                    if isinstance(formula, tuple):
-                        self.formula_current = list(formula)
-                    elif isinstance(formula, list):
-                        self.formula_current = formula.copy()
+                    self.formula_current = list(formula) if isinstance(formula, (tuple, list)) else formula
 
                 src = X[:, :, 0]
                 frac = X[:, :, 1]
@@ -307,11 +276,8 @@ class ModelTrainer:
                 output = self.model.forward(src, frac)
                 prediction, uncertainty = output.chunk(2, dim=-1)
 
-                # Use exponent form for uncertainty if applicable
                 uncertainty = torch.exp(uncertainty) * self.scaler.std
-
                 prediction = self.scaler.unscale(prediction)
-
                 if self.classification:
                     prediction = torch.sigmoid(prediction)
 
@@ -323,13 +289,10 @@ class ModelTrainer:
                 uncert[data_loc] = uncertainty.view(-1).cpu().numpy().astype('float32')
                 formulae[data_loc] = formula
 
-        self.model.train()  # Switch back to train mode if needed
+        self.model.train()
         return (act, pred, formulae, uncert)
 
     def save_network(self, model_name=None):
-        """
-        Saves the model weights and scaler state.
-        """
         if model_name is None:
             model_name = self.model_name
         os.makedirs('models/trained_models', exist_ok=True)
@@ -344,9 +307,6 @@ class ModelTrainer:
         torch.save(save_dict, path)
 
     def load_network(self, path):
-        """
-        Loads model and scaler state from the .pth file.
-        """
         path = f'models/trained_models/{path}'
         checkpoint = torch.load(path, map_location=self.compute_device)
 
