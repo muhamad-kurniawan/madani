@@ -5,7 +5,7 @@ import pandas as pd
 import torch
 from time import time
 import matplotlib.pyplot as plt
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CyclicLR
 from sklearn.metrics import mean_absolute_error, roc_auc_score
 
 from madani.utils.scaling import Scaler, DummyScaler
@@ -23,6 +23,7 @@ class ModelTrainer:
                  verbose=True,
                  drop_unary=True,
                  scale=True):
+
         self.model = model
         self.model_name = model_name
         self.data_loader = None      
@@ -36,11 +37,13 @@ class ModelTrainer:
         self.drop_unary = drop_unary
         self.scale = scale
 
+        # Set device if not set
         if self.compute_device is None:
             self.compute_device = get_compute_device()
 
-        # List to store snapshots for ensemble
-        self.snapshots = []
+        # Internal flags/vars
+        self.snapshots = []  # list to store ensemble snapshots
+        self.capture_flag = False
         self.formula_current = None
         self.act_v = None
         self.pred_v = None
@@ -65,8 +68,10 @@ class ModelTrainer:
                                    scale=self.scale)
 
         print(f'Loading data with up to {data_loaders.n_elements:0.0f} elements in the formula')
+        # Update n_elements in case it was inferred/adjusted
         self.n_elements = data_loaders.n_elements
 
+        # Grab the DataLoader
         data_loader = data_loaders.get_data_loaders(inference=inference)
         y = data_loader.dataset.y
         if train:
@@ -78,23 +83,26 @@ class ModelTrainer:
             self.train_loader = data_loader
         self.data_loader = data_loader
 
-    def fit_auto_ensemble(self, epochs=None, checkin=None, losscurve=False,
-                          feature_selection_phase=0.5, improvement_threshold=0.01,
-                          patience=5, cycle_length=10):
+    def fit(self, epochs=None, checkin=None, losscurve=False, discard_n=10, 
+            feature_selection_phase=0.5, patience_threshold=10):
         """
-        Trains the model using a cosine annealing LR schedule with adaptive snapshot capture.
-        If the validation loss does not improve by at least 'improvement_threshold'
-        for 'patience' consecutive epochs, a snapshot is captured and the LR scheduler is reset.
-        
-        Parameters:
-          improvement_threshold: relative improvement required (e.g., 0.01 means 1% improvement)
-          patience: number of epochs with insufficient improvement before capturing a snapshot.
-          cycle_length: when resetting, use this as the period for the cosine annealing LR scheduler.
+        Trains the model with an adaptive ensemble strategy.
+        Every 'checkin' epochs, the validation loss is measured.
+        If a new minimum is reached, the model snapshot is captured.
+        If no improvement occurs for 'patience_threshold' epochs, a snapshot is saved 
+        and the learning rate is reset to its maximum to encourage exploration.
         """
+        # Safety checks
         assert self.train_loader is not None, "Please load training data."
         assert self.data_loader is not None, "Please load validation data."
 
+        # Prepare tracking dictionaries
         self.loss_curve = {'train': [], 'val': []}
+
+        # Set up stepping for LR scheduler (steps per epoch)
+        self.epochs_step = 1   # step after every epoch
+        self.step_size = self.epochs_step * len(self.train_loader)
+        print(f'Stepping every {self.step_size} training passes, cycling LR every {self.epochs_step} epochs')
 
         if epochs is None:
             n_iterations = 1e4
@@ -102,8 +110,8 @@ class ModelTrainer:
             print(f'Running for {epochs} epochs')
 
         if checkin is None:
-            checkin = 2
-            print(f'Checkin at every {checkin} epochs')
+            checkin = self.epochs_step * 2
+            print(f'Checkin every {checkin} epochs')
 
         # Loss function
         self.criterion = RobustL1
@@ -111,16 +119,25 @@ class ModelTrainer:
             print("Using BCE loss for classification task")
             self.criterion = BCEWithLogitsLoss
 
-        # Build optimizer using Lookahead over Lamb
+        # Build optimizer (without SWA) using Lookahead over Lamb
         base_optim = Lamb(params=self.model.parameters())
         self.optimizer = Lookahead(base_optimizer=base_optim)
 
-        # Initialize cosine annealing scheduler with period = cycle_length
-        self.lr_scheduler = CosineAnnealingLR(self.optimizer, T_max=cycle_length)
+        # Cyclical LR scheduler
+        lr_scheduler = CyclicLR(self.optimizer,
+                                base_lr=1e-4,
+                                max_lr=6e-3,
+                                cycle_momentum=False,
+                                step_size_up=self.step_size)
+        self.lr_scheduler = lr_scheduler
+        self.stepping = True
         self.lr_list = []
+        self.xswa = []  # unused here, but maintained for plotting compatibility
+        self.discard_n = discard_n
 
-        best_val_loss = None
-        no_improve_counter = 0
+        # Initialize adaptive ensemble tracking variables
+        best_val_loss = float('inf')
+        patience_counter = 0
 
         # ---- TRAINING LOOP ----
         for epoch in range(epochs):
@@ -153,26 +170,26 @@ class ModelTrainer:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-                # Step the cosine annealing scheduler after each batch
-                self.lr_scheduler.step()
+                if self.stepping:
+                    self.lr_scheduler.step()
 
             dt = time() - ti
 
-            # Evaluate on the validation set at checkin intervals
+            # Check performance at intervals
             if (epoch+1) % checkin == 0 or epoch == epochs - 1 or epoch == 0:
                 with torch.no_grad():
-                    act_v, pred_v, _, _ = self._predict_single(self.data_loader)
-                val_loss = mean_absolute_error(act_v, pred_v)
-                self.loss_curve['val'].append(val_loss)
+                    act_t, pred_t, _, _ = self.predict(self.train_loader)
+                mae_t = mean_absolute_error(act_t, pred_t)
+                self.loss_curve['train'].append(mae_t)
 
                 with torch.no_grad():
-                    act_t, pred_t, _, _ = self._predict_single(self.train_loader)
-                train_loss = mean_absolute_error(act_t, pred_t)
-                self.loss_curve['train'].append(train_loss)
+                    act_v, pred_v, _, _ = self.predict(self.data_loader)
+                mae_v = mean_absolute_error(act_v, pred_v)
+                self.loss_curve['val'].append(mae_v)
 
                 epoch_str = f'Epoch: {epoch}/{epochs} ---'
-                train_str = f'train mae: {train_loss:0.4g}'
-                val_str = f'val mae: {val_loss:0.4g}'
+                train_str = f'train mae: {self.loss_curve["train"][-1]:0.4g}'
+                val_str = f'val mae: {self.loss_curve["val"][-1]:0.4g}'
                 if self.classification:
                     train_auc = roc_auc_score(act_t, pred_t)
                     val_auc = roc_auc_score(act_v, pred_v)
@@ -180,7 +197,25 @@ class ModelTrainer:
                     val_str = f'val auc: {val_auc:0.3f}'
                 print(epoch_str, train_str, val_str)
 
-                # Optionally plot the loss curves
+                # Adaptive snapshot ensembling based on validation loss improvement
+                if mae_v < best_val_loss:
+                    best_val_loss = mae_v
+                    patience_counter = 0
+                    snapshot = copy.deepcopy(self.model.state_dict())
+                    self.snapshots.append(snapshot)
+                    print(f"Epoch {epoch}: New best validation loss {mae_v:.4f} - snapshot captured.")
+                else:
+                    patience_counter += 1
+                    print(f"Epoch {epoch}: No improvement, patience {patience_counter}/{patience_threshold}.")
+                    if patience_counter >= patience_threshold:
+                        snapshot = copy.deepcopy(self.model.state_dict())
+                        self.snapshots.append(snapshot)
+                        print(f"Epoch {epoch}: Patience threshold reached, snapshot captured and resetting LR.")
+                        # Reset the learning rate to maximum to encourage exploration.
+                        for param_group in self.optimizer.param_groups:
+                            param_group['lr'] = 6e-3
+                        patience_counter = 0
+
                 if losscurve:
                     plt.figure(figsize=(8, 5))
                     xval = np.arange(len(self.loss_curve['val'])) * checkin
@@ -193,39 +228,25 @@ class ModelTrainer:
                     plt.legend()
                     plt.show()
 
-            # Check if validation loss has improved sufficiently
-            if best_val_loss is None or val_loss < best_val_loss * (1 - improvement_threshold):
-                best_val_loss = val_loss
-                no_improve_counter = 0
-            else:
-                no_improve_counter += 1
+                    if hasattr(self.model.encoder.embed, 'feature_selector'):
+                        print(f'hard mask: {self.model.encoder.embed.feature_selector.hard_mask()}')
 
-            # If no significant improvement for 'patience' epochs, capture a snapshot and reset scheduler
-            if no_improve_counter >= patience:
-                snapshot = copy.deepcopy(self.model.state_dict())
-                self.snapshots.append(snapshot)
-                print(f"No significant improvement for {patience} epochs. Captured snapshot at epoch {epoch+1}. Total snapshots: {len(self.snapshots)}")
-                no_improve_counter = 0
-                # Reinitialize the cosine annealing scheduler
-                self.lr_scheduler = CosineAnnealingLR(self.optimizer, T_max=cycle_length)
-            
-            self.lr_list.append(self.optimizer.param_groups[0]['lr'])
-
+            # (Optional) Early stopping could be applied here if desired.
         print(f"Training finished. Total snapshots captured: {len(self.snapshots)}")
 
-    def _predict_single(self, loader):
+    def predict(self, loader):
         """
-        Runs inference on a given DataLoader using the current model weights.
+        Runs inference on a given DataLoader.
+        If ensemble snapshots are available, predictions are obtained from each snapshot and averaged.
         Returns (act, pred, formulae, uncert).
-        Applies the hard mask as in the original predict method.
         """
         if isinstance(loader, str):
             from madani.utils.input_processing import DataHandler
             data_handler = DataHandler(loader, batch_size=64, n_elements=self.n_elements,
-                                       inference=True, verbose=self.verbose,
-                                       drop_unary=self.drop_unary, scale=self.scale)
+                                       inference=True, verbose=self.verbose, drop_unary=self.drop_unary, scale=self.scale)
             loader = data_handler.get_data_loaders(inference=True)
 
+        # Save original embedder forward method.
         original_embed_forward = self.model.encoder.embed.forward
 
         def embed_hard(src):
@@ -294,44 +315,10 @@ class ModelTrainer:
                     formulae[idx_start:idx_end] = [formula] * batch_size
                 idx_start = idx_end
 
+        # Restore the original embedder forward method.
         self.model.encoder.embed.forward = original_embed_forward
         self.model.train()
         return act, pred, formulae, uncert
-
-    def predict(self, loader):
-        """
-        Runs inference on a given DataLoader.
-        If snapshots are available, predictions are obtained from each snapshot and ensembled.
-        For classification tasks the ensemble uses a geometric mean; for regression, an arithmetic mean.
-        Returns (act, pred, formulae, uncert).
-        """
-        if len(self.snapshots) > 0:
-            all_preds = []
-            all_uncerts = []
-            all_act = None
-            all_formulae = None
-            original_state = copy.deepcopy(self.model.state_dict())
-            for snap in self.snapshots:
-                self.model.load_state_dict(snap)
-                act, pred, formulae, uncert = self._predict_single(loader)
-                if all_act is None:
-                    all_act = act
-                    all_formulae = formulae
-                all_preds.append(pred)
-                all_uncerts.append(uncert)
-            self.model.load_state_dict(original_state)
-            if self.classification:
-                eps = 1e-10
-                stacked_preds = np.stack(all_preds, axis=0)
-                geo_pred = np.exp(np.mean(np.log(stacked_preds + eps), axis=0))
-                avg_pred = geo_pred
-                avg_uncert = np.mean(np.stack(all_uncerts, axis=0), axis=0)
-            else:
-                avg_pred = np.mean(np.stack(all_preds, axis=0), axis=0)
-                avg_uncert = np.mean(np.stack(all_uncerts, axis=0), axis=0)
-            return all_act, avg_pred, all_formulae, avg_uncert
-        else:
-            return self._predict_single(loader)
 
     def save_network(self, model_name=None):
         if model_name is None:
@@ -350,6 +337,7 @@ class ModelTrainer:
     def load_network(self, path):
         path = f'models/trained_models/{path}'
         checkpoint = torch.load(path, map_location=self.compute_device)
+        from madani.utils.optims import Lamb, Lookahead
         base_optim = Lamb(params=self.model.parameters())
         self.optimizer = Lookahead(base_optimizer=base_optim)
         self.scaler = Scaler(torch.zeros(3))
@@ -360,13 +348,12 @@ class ModelTrainer:
 
 # Example usage
 if __name__ == '__main__':
-    # For example, assume d_model=512 for the transformer and select 200 features from the raw element vector.
+    # For instance, assume d_model=512 for the transformer,
+    # and we wish to select 200 features from the raw element vector.
     model = CrabNet(out_dims=3, d_model=512, N=3, heads=4, feature_selector_k=200)
     print(model)
     
-    # trainer = ModelTrainer(model, model_name='CrabNet', n_elements=8)
-    # # Load training and validation data using trainer.load_data(...)
-    # # Then call the adaptive snapshot ensemble training:
-    # trainer.fit_auto_ensemble(epochs=1000, checkin=5, losscurve=True,
-    #                           feature_selection_phase=0.5, improvement_threshold=0.01,
-    #                           patience=5, cycle_length=10)
+    trainer = ModelTrainer(model, model_name='CrabNet', n_elements=8)
+    # Load your training and validation data using trainer.load_data(...)
+    # Then call:
+    trainer.fit(epochs=1000, checkin=5, losscurve=True, discard_n=500, feature_selection_phase=0.5)
