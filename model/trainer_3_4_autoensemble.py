@@ -38,7 +38,7 @@ class ModelTrainer:
         self.drop_unary = drop_unary
         self.scale = scale
 
-        # Set device
+        # Set device if not already set
         if self.compute_device is None:
             self.compute_device = get_compute_device()
 
@@ -51,7 +51,7 @@ class ModelTrainer:
         # For Auto-Ensemble snapshots
         self.snapshots = []
 
-        # For recording checkin points (for plotting loss curves)
+        # For recording checkin points for plotting loss curves
         self.xswa = []
         self.yswa = []
 
@@ -91,47 +91,102 @@ class ModelTrainer:
             self.train_loader = data_loader
         self.data_loader = data_loader
 
-    def fit(self, epochs=None, checkin=None, losscurve=False, adaptive_threshold=0.01):
+    def fit(self, epochs=None, checkin=None, losscurve=False, 
+            adaptive_threshold=0.01, pretrain_epochs=0):
         """
         Trains the model using a cyclic LR scheduler.
-        At every checkin interval the validation MAE is computed.
+        
+        pretrain_epochs: If > 0, run a pre-training phase for these many epochs
+                         before starting the main training with adaptive snapshot capture.
+                         
+        At every checkin interval in the main training phase, the validation MAE is computed.
         If the relative improvement over the best validation MAE is less than adaptive_threshold,
         a snapshot of the model is captured.
         """
         assert self.train_loader is not None, "Please load training data."
         assert self.data_loader is not None, "Please load validation data."
 
+        # Initialize loss curves
         self.loss_curve = {'train': [], 'val': []}
-        self.epochs_step = 1
+        self.epochs_step = 1  # step after every epoch
         self.step_size = self.epochs_step * len(self.train_loader)
         print(f'Stepping every {self.step_size} training passes, cycling LR every {self.epochs_step} epochs')
 
+        # Determine total epochs if not specified (for main training phase)
         if epochs is None:
             n_iterations = 1e4
             epochs = int(n_iterations / len(self.data_loader))
-            print(f'Running for {epochs} epochs')
+            print(f'Running for {epochs} epochs (main training phase)')
 
         if checkin is None:
             checkin = self.epochs_step * 2
             print(f'Checkin at {checkin} epochs to match LR scheduler')
 
+        # --- PRE-TRAINING PHASE ---
+        if pretrain_epochs > 0:
+            print(f"Starting pre-training phase for {pretrain_epochs} epochs...")
+            # We use the same optimizer and LR scheduler here.
+            base_optim = Lamb(params=self.model.parameters())
+            self.optimizer = Lookahead(base_optimizer=base_optim)
+            pretrain_scheduler = CyclicLR(self.optimizer,
+                                          base_lr=1e-4,
+                                          max_lr=6e-3,
+                                          cycle_momentum=False,
+                                          step_size_up=self.step_size)
+            for epoch in range(pretrain_epochs):
+                self.model.train()
+                ti = time()
+                for i, data in enumerate(self.train_loader):
+                    X, y, formula = data
+                    y = self.scaler.scale(y)
+
+                    src = X[:, :, 0]
+                    frac = X[:, :, 1]
+                    frac = frac * (1 + (torch.randn_like(frac)) * self.fudge)
+                    frac = torch.clamp(frac, 0, 1)
+                    frac[src == 0] = 0
+                    frac = frac / frac.sum(dim=1, keepdim=True)
+
+                    src = src.to(self.compute_device, dtype=torch.long, non_blocking=True)
+                    frac = frac.to(self.compute_device, dtype=data_type_torch, non_blocking=True)
+                    y = y.to(self.compute_device, dtype=data_type_torch, non_blocking=True)
+
+                    output = self.model.forward(src, frac)
+                    prediction, uncertainty = output.chunk(2, dim=-1)
+                    loss = self.criterion(
+                        prediction.reshape(-1),
+                        uncertainty.reshape(-1),
+                        y.reshape(-1)
+                    )
+                    loss.backward()
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+
+                    pretrain_scheduler.step()
+
+                dt = time() - ti
+                print(f"Pre-training Epoch {epoch+1}/{pretrain_epochs} complete in {dt:0.2f}s")
+            print("Pre-training phase completed.\n")
+
+            # Optionally, reinitialize the LR scheduler for the main training phase.
+            self.lr_scheduler = CyclicLR(self.optimizer,
+                                         base_lr=1e-4,
+                                         max_lr=6e-3,
+                                         cycle_momentum=False,
+                                         step_size_up=self.step_size)
+        else:
+            # If no pre-training phase, initialize optimizer and scheduler now.
+            base_optim = Lamb(params=self.model.parameters())
+            self.optimizer = Lookahead(base_optimizer=base_optim)
+            self.lr_scheduler = CyclicLR(self.optimizer,
+                                         base_lr=1e-4,
+                                         max_lr=6e-3,
+                                         cycle_momentum=False,
+                                         step_size_up=self.step_size)
+
+        # --- MAIN TRAINING PHASE WITH AUTO-ENSEMBLE ---
         self.best_val = float('inf')
-
-        self.criterion = RobustL1
-        if self.classification:
-            print("Using BCE loss for classification task")
-            self.criterion = BCEWithLogitsLoss
-
-        base_optim = Lamb(params=self.model.parameters())
-        self.optimizer = Lookahead(base_optimizer=base_optim)
-        self.lr_scheduler = CyclicLR(self.optimizer,
-                                     base_lr=1e-4,
-                                     max_lr=6e-3,
-                                     cycle_momentum=False,
-                                     step_size_up=self.step_size)
-        self.stepping = True
-        self.lr_list = []
-
+        self.lr_list = []  # reset LR list
         for epoch in range(epochs):
             self.epoch = epoch
             self.model.train()
@@ -159,7 +214,6 @@ class ModelTrainer:
 
                 output = self.model.forward(src, frac)
                 prediction, uncertainty = output.chunk(2, dim=-1)
-
                 loss = self.criterion(
                     prediction.reshape(-1),
                     uncertainty.reshape(-1),
@@ -169,7 +223,7 @@ class ModelTrainer:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-                if self.stepping:
+                if self.lr_scheduler is not None:
                     self.lr_scheduler.step()
 
             dt = time() - ti
@@ -203,11 +257,10 @@ class ModelTrainer:
 
                 print(epoch_str, train_str, val_str)
 
-                # Record checkin points for plotting
                 self.xswa.append(epoch)
                 self.yswa.append(mae_v)
 
-                # Adaptive snapshot logic:
+                # Adaptive snapshot capture:
                 if self.best_val == float('inf'):
                     self.best_val = mae_v
                 else:
