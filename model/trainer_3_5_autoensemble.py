@@ -131,8 +131,9 @@ class ModelTrainer:
             self.criterion = BCEWithLogitsLoss
 
         # Build optimizer with Lamb + Lookahead
-        base_optim = Lamb(params=self.model.parameters())
-        self.optimizer = Lookahead(base_optimizer=base_optim)
+        # base_optim = Lamb(params=self.model.parameters())
+        # self.optimizer = Lookahead(base_optimizer=base_optim)
+        self.optimizer = Lamb(params=self.model.parameters())
 
         # Optional: pre-training phase
         if pretrain_epochs > 0:
@@ -438,9 +439,10 @@ class ModelTrainer:
         path = f'models/trained_models/{path}'
         checkpoint = torch.load(path, map_location=self.compute_device)
 
-        base_optim = Lamb(params=self.model.parameters())
-        optimizer = Lookahead(base_optimizer=base_optim)
-        self.optimizer = optimizer
+        # base_optim = Lamb(params=self.model.parameters())
+        # optimizer = Lookahead(base_optimizer=base_optim)
+        # self.optimizer = optimizer
+        self.optimizer = Lamb(params=self.model.parameters())
 
         self.scaler = Scaler(torch.zeros(3))
 
