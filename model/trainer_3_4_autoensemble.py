@@ -300,13 +300,13 @@ class ModelTrainer:
         Returns: (act, pred, formulae, uncert)
         """
         if isinstance(loader, str):
-            loader = DataHandler(loader,
-                                 batch_size=64,
-                                 n_elements=self.n_elements,
-                                 inference=True,
-                                 verbose=self.verbose,
-                                 drop_unary=self.drop_unary,
-                                 scale=self.scale)
+        loader = DataHandler(loader,
+                             batch_size=64,
+                             n_elements=self.n_elements,
+                             inference=True,
+                             verbose=self.verbose,
+                             drop_unary=self.drop_unary,
+                             scale=self.scale).get_data_loaders(inference=True)
         len_dataset = len(loader.dataset)
         n_atoms = int(len(loader.dataset[0][0]))
 
