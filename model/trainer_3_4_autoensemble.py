@@ -122,6 +122,11 @@ class ModelTrainer:
             checkin = self.epochs_step * 2
             print(f'Checkin at {checkin} epochs to match LR scheduler')
 
+        self.criterion = RobustL1
+        if self.classification:
+            print("Using BCE loss for classification task")
+            self.criterion = BCEWithLogitsLoss
+            
         # --- PRE-TRAINING PHASE ---
         if pretrain_epochs > 0:
             print(f"Starting pre-training phase for {pretrain_epochs} epochs...")
