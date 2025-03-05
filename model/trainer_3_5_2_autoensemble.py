@@ -329,6 +329,7 @@ class ModelTrainer:
                     self.formula_current = list(formula) if isinstance(formula, (tuple, list)) else formula
 
                 src = X[:, :, 0]
+                print(f'src:{src[:5]}')
                 frac = X[:, :, 1]
                 src = src.to(self.compute_device, dtype=torch.long, non_blocking=True)
                 frac = frac.to(self.compute_device, dtype=data_type_torch, non_blocking=True)
