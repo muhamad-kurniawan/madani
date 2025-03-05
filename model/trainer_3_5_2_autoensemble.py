@@ -345,6 +345,7 @@ class ModelTrainer:
                     prediction = torch.sigmoid(prediction)
 
                 data_loc = slice(i*self.batch_size, i*self.batch_size + len(y))
+                print(f'data_loc:{data_loc}')
                 atoms[data_loc, :] = src.cpu().numpy().astype('int32')
                 fractions[data_loc, :] = frac.cpu().numpy().astype('float32')
                 act[data_loc] = y.view(-1).cpu().numpy().astype('float32')
