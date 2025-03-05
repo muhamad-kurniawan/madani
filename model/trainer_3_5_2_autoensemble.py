@@ -324,6 +324,7 @@ class ModelTrainer:
         with torch.no_grad():
             for i, data in enumerate(loader):
                 X, y, formula = data
+                print(f'predict:{X[:5]}')
                 if self.capture_flag:
                     self.formula_current = list(formula) if isinstance(formula, (tuple, list)) else formula
 
