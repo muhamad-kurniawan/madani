@@ -308,6 +308,8 @@ class ModelTrainer:
                                  verbose=self.verbose,
                                  drop_unary=self.drop_unary,
                                  scale=self.scale).get_data_loaders(inference=True)
+            loader = loader.get_data_loaders(inference=True)
+
         len_dataset = len(loader.dataset)
         n_atoms = int(len(loader.dataset[0][0]))
 
