@@ -324,12 +324,12 @@ class ModelTrainer:
         with torch.no_grad():
             for i, data in enumerate(loader):
                 X, y, formula = data
-                print(f'predict:{X[:5]}')
+                # print(f'predict:{X[:5]}')
                 if self.capture_flag:
                     self.formula_current = list(formula) if isinstance(formula, (tuple, list)) else formula
 
                 src = X[:, :, 0]
-                print(f'src:{src[:5]}')
+                # print(f'src:{src[:5]}')
                 frac = X[:, :, 1]
                 src = src.to(self.compute_device, dtype=torch.long, non_blocking=True)
                 frac = frac.to(self.compute_device, dtype=data_type_torch, non_blocking=True)
@@ -344,8 +344,8 @@ class ModelTrainer:
                 if self.classification:
                     prediction = torch.sigmoid(prediction)
 
-                data_loc = slice(i*self.batch_size, i*self.batch_size + len(y))
-                print(f'data_loc:{data_loc}')
+                data_loc = slice(i*self.batch_size, (i+1)*self.batch_size)
+                # print(f'data_loc:{data_loc}')
                 atoms[data_loc, :] = src.cpu().numpy().astype('int32')
                 fractions[data_loc, :] = frac.cpu().numpy().astype('float32')
                 act[data_loc] = y.view(-1).cpu().numpy().astype('float32')
