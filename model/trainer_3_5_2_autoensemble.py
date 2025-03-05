@@ -62,7 +62,7 @@ class ModelTrainer:
         if self.capture_every is not None:
             print(f'Capturing attention tensors every {self.capture_every}')
 
-    def load_data(self, file_name, batch_size=64, train=False):
+    def load_data(self, file_name, batch_size=2**9, train=False):
         """
         Loads data from file_name via DataHandler.
         """
@@ -366,7 +366,7 @@ class ModelTrainer:
 
         if isinstance(loader, str):
             loader = DataHandler(loader,
-                                 batch_size=64,
+                                 batch_size=2**9,
                                  n_elements=self.n_elements,
                                  inference=True,
                                  verbose=self.verbose,
