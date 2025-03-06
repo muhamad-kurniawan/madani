@@ -149,6 +149,7 @@ class ModelTrainer:
                     y = self.scaler.scale(y)
 
                     src = X[:, :, 0]
+                    print(f'src: {src}')
                     frac = X[:, :, 1]
                     frac = frac * (1 + (torch.randn_like(frac)) * self.fudge)
                     frac = torch.clamp(frac, 0, 1)
