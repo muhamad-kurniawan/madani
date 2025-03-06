@@ -11,7 +11,7 @@ from madani.utils.optims import RobustL1, BCEWithLogitsLoss
 from madani.utils.optims import Lamb, Lookahead
 from madani.utils.utils import count_parameters, get_compute_device
 from madani.utils.input_processing import DataHandler, data_type_torch
-
+from madani.model.interpreter
 
 class ModelTrainer:
     def __init__(self,
@@ -430,3 +430,7 @@ class ModelTrainer:
         self.scaler.load_state_dict(checkpoint['scaler_state'])
         self.model_name = checkpoint['model_name']
         print(f"Loaded network '{self.model_name}' from {path}")
+
+    def feature_importance_calc(self):
+        importance = interpreter(model)
+        return
