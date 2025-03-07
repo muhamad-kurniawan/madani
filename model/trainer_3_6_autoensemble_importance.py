@@ -570,3 +570,51 @@ class ModelTrainer:
             avg_importance = torch.stack(importance_list, dim=0).mean(dim=0)
         return avg_importance
 
+     def aggregate_token_knockout_importance(self, data_input, baseline_token=0, batch_size=128):
+        """
+        Computes token-level knockout importance over the entire dataset (provided as a CSV or DataLoader)
+        and aggregates the results by token.
+        
+        Args:
+            data_input (str or DataLoader): CSV file path or DataLoader.
+            baseline_token (int): Token used for knockout.
+            batch_size (int): Batch size if loading from CSV.
+        
+        Returns:
+            dict: A mapping from token index to its average importance score.
+        """
+        loader = self._get_loader(data_input, batch_size=batch_size)
+        importance_list = []
+        src_list = []
+        self.model.eval()
+        with torch.no_grad():
+            for i, data in enumerate(loader):
+                X, y, formula = data
+                # Extract token indices (src) and fractional amounts (frac)
+                src = X[:, :, 0]  # shape [B, T]
+                frac = X[:, :, 1]  # shape [B, T]
+                src = src.to(self.compute_device, dtype=torch.long)
+                frac = frac.to(self.compute_device, dtype=data_type_torch)
+                token_imp = self.token_knockout_importance(src, frac, baseline_token)
+                importance_list.append(token_imp.cpu())
+                src_list.append(src.cpu())
+        
+        # Concatenate all batches
+        all_importance = torch.cat(importance_list, dim=0)  # [N, T]
+        all_src = torch.cat(src_list, dim=0)                  # [N, T]
+        
+        # Aggregate importance: For each unique token, average the importance scores.
+        token_importance_dict = {}
+        token_counts = {}
+        B, T = all_importance.shape
+        for b in range(B):
+            for t in range(T):
+                token = int(all_src[b, t].item())
+                imp_val = all_importance[b, t].item()
+                token_importance_dict[token] = token_importance_dict.get(token, 0.0) + imp_val
+                token_counts[token] = token_counts.get(token, 0) + 1
+        
+        avg_importance = {token: token_importance_dict[token] / token_counts[token] 
+                          for token in token_importance_dict}
+        return avg_importance
+
