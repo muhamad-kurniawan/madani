@@ -11,7 +11,7 @@ from madani.utils.optims import RobustL1, BCEWithLogitsLoss
 from madani.utils.optims import Lamb, Lookahead
 from madani.utils.utils import count_parameters, get_compute_device
 from madani.utils.input_processing import DataHandler, data_type_torch
-from madani.model.interpreter
+# from madani.model.interpreter
 
 class ModelTrainer:
     def __init__(self,
