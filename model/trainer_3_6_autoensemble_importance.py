@@ -570,7 +570,7 @@ class ModelTrainer:
             avg_importance = torch.stack(importance_list, dim=0).mean(dim=0)
         return avg_importance
 
-     def aggregate_token_knockout_importance(self, data_input, baseline_token=0, batch_size=128):
+    def aggregate_token_knockout_importance(self, data_input, baseline_token=0, batch_size=128):
         """
         Computes token-level knockout importance over the entire dataset (provided as a CSV or DataLoader)
         and aggregates the results by token.
