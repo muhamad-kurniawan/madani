@@ -701,9 +701,11 @@ class ModelTrainer:
         plt.ylabel("Knockout Importance")
         
         # If we have formula_list, we can label the plot with the actual formula
-        title_str = f"Element Importance for Formula Index {formula_index}"
+        # title_str = f"Element Importance for Formula Index {formula_index}"
+	title_str = f"Element Importance for Formula"
+
         if formula_index < len(formula_list):
-            title_str += f" ({formula_list[formula_index]})"
+            title_str += f" {formula_list[formula_index]}"
         plt.title(title_str)
 
         plt.xticks(rotation=45, ha="right")
