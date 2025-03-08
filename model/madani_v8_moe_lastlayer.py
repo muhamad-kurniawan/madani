@@ -62,7 +62,8 @@ class Embedder(nn.Module):
 
         elem_dir = 'madani/data/element_properties'
         mat2vec = f'{elem_dir}/mat2vec.csv'  # element embedding
-        # mat2vec = f'{elem_dir}/magpie.csv'  # element embedding             
+        # mat2vec = f'{elem_dir}/magpie.csv'  # element embedding   
+        mat2vec = f'{elem_dir}/oliynyk_2024.csv'
 
         cbfv = pd.read_csv(mat2vec, index_col=0).values
         feat_size = cbfv.shape[-1]
