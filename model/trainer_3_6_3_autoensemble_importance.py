@@ -619,76 +619,94 @@ class ModelTrainer:
     def plot_element_importance_for_formula(
         self,
         data_input,
-        formula_index=0,
+        formula_index=None,
+        formula_str=None,
         baseline_token=0,
         batch_size=128,
         element_symbols=None
-    	):
+    ):
         """
         Gathers data from either a CSV or a DataLoader, computes token-level knockout
         for the entire dataset, and then plots a bar chart of element importance for
-        the specified formula index.
-        
+        the specified formula. You can specify either a formula_index or a formula_str.
+
         Args:
             data_input (str or DataLoader): Path to CSV or an existing DataLoader.
             formula_index (int): Which formula (row) to visualize in the aggregated data.
-            baseline_token (int): Token used to knock out each element.
+            formula_str (str): The exact formula string to find in the dataset.
+            baseline_token (int): Token used for knockout.
             batch_size (int): Batch size if loading from CSV.
             element_symbols (dict): Mapping {token_index: 'ElementSymbol'} for labeling.
         """
-        # 1) Build or retrieve the loader
+        # Ensure user doesn't pass both or neither
+        if formula_index is not None and formula_str is not None:
+            raise ValueError("Please specify either formula_index or formula_str, not both.")
+        
+        # Build or retrieve the loader
         loader = self._get_loader(data_input, batch_size=batch_size)
 
-        # 2) Collect all data so we can index formula_index
+        # Collect all data so we can index formula or search for formula_str
         X_list = []
         formula_list = []
         for i, data in enumerate(loader):
             X_batch, y_batch, f_batch = data
             X_list.append(X_batch)
-            formula_list.extend(f_batch)  # store formula strings if needed
+            formula_list.extend(f_batch)  # store formula strings
 
         # Concatenate into a single tensor (shape: [N, T, 2])
         X_cat = torch.cat(X_list, dim=0)
-        # We assume formula_index < len(X_cat), so be mindful of large data sets
 
-        # 3) Extract src, frac for the entire dataset
+        # If formula_str is given, find its index in formula_list
+        if formula_str is not None:
+            if formula_str in formula_list:
+                formula_index = formula_list.index(formula_str)
+            else:
+                raise ValueError(f"Formula '{formula_str}' not found in dataset.")
+        # If neither was provided, default to 0
+        if formula_index is None:
+            formula_index = 0
+
+        if formula_index >= X_cat.shape[0]:
+            raise IndexError(f"formula_index {formula_index} out of range (max {X_cat.shape[0]-1}).")
+
+        # Extract src, frac for the entire dataset
         src_cat = X_cat[:, :, 0].to(self.compute_device, dtype=torch.long)
         frac_cat = X_cat[:, :, 1].to(self.compute_device, dtype=data_type_torch)
 
-        # 4) Compute knockout importance for all formulas
+        # Compute knockout importance for all formulas
         token_imp_cat = self.token_knockout_importance(src_cat, frac_cat, baseline_token=baseline_token)
 
-        # 5) Select the formula we want to visualize
-        if formula_index >= src_cat.shape[0]:
-            raise IndexError(f"formula_index {formula_index} is out of range (max {src_cat.shape[0]-1}).")
-
+        # Select the formula we want to visualize
         src_single = src_cat[formula_index]       # shape: [T]
         imp_single = token_imp_cat[formula_index] # shape: [T]
 
-        # 6) Sort by importance (descending)
+        # Sort by importance (descending)
         sorted_indices = torch.argsort(imp_single, descending=True)
         sorted_imp = imp_single[sorted_indices]
         sorted_tokens = src_single[sorted_indices]
 
-        # 7) Convert token indices to element labels
+        # Convert token indices to element labels
         if element_symbols is not None:
-            labels = [element_symbols.get(int(tok.item()), f"Z{int(tok.item())}") 
-                      for tok in sorted_tokens]
+            labels = [
+                element_symbols.get(int(tok.item()), f"Z{int(tok.item())}") 
+                for tok in sorted_tokens
+            ]
         else:
             labels = [f"Z{int(tok.item())}" for tok in sorted_tokens]
 
-        # 8) Plot a simple bar chart
+        # Plot a simple bar chart
         plt.figure(figsize=(8, 4))
         plt.bar(labels, sorted_imp.cpu().numpy(), color='royalblue')
         plt.xlabel("Element")
         plt.ylabel("Knockout Importance")
+        
+        # If we have formula_list, we can label the plot with the actual formula
         title_str = f"Element Importance for Formula Index {formula_index}"
         if formula_index < len(formula_list):
-            # Optionally include the actual formula string in the title
             title_str += f" ({formula_list[formula_index]})"
         plt.title(title_str)
+
         plt.xticks(rotation=45, ha="right")
         plt.tight_layout()
-        plt.show()  
-
+        plt.show()
     
