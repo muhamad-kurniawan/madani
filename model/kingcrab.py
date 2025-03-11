@@ -58,11 +58,11 @@ class Embedder(nn.Module):
 
         elem_dir = 'madani/data/element_properties'
         # # Choose what element information the model receives
-        # mat2vec = f'{elem_dir}/mat2vec.csv'  # element embedding
+        mat2vec = f'{elem_dir}/mat2vec.csv'  # element embedding
         # mat2vec = f'{elem_dir}/onehot.csv'  # onehot encoding (atomic number)
         # mat2vec = f'{elem_dir}/random_200.csv'  # random vec for elements
         # mat2vec = f'{elem_dir}/oliynyk.csv'  # random vec for elements
-        mat2vec = f'{elem_dir}/magpie.csv'  # random vec for elements
+        # mat2vec = f'{elem_dir}/magpie.csv'  # random vec for elements
 
         cbfv = pd.read_csv(mat2vec, index_col=0).values
         feat_size = cbfv.shape[-1]
