@@ -5,15 +5,14 @@ import torch
 from time import time
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_absolute_error, roc_auc_score
+import tempfile
+import pandas as pd
 
 from madani.utils.scaling import Scaler, DummyScaler
 from madani.utils.optims import RobustL1, BCEWithLogitsLoss
 from madani.utils.optims import Lamb, Lookahead
 from madani.utils.utils import count_parameters, get_compute_device
 from madani.utils.input_processing import DataHandler, data_type_torch
-import itertools
-from scipy.stats import pearsonr
-import numpy as np
 # from madani.model.interpreter
 
 class ModelTrainer:
@@ -39,20 +38,15 @@ class ModelTrainer:
         self.drop_unary = drop_unary
         self.scale = scale
 
-        # If the model doesn't specify a device, pick one
         if self.compute_device is None:
             self.compute_device = get_compute_device()
 
-        # Internal flags/vars
         self.capture_flag = False
         self.formula_current = None
         self.act_v = None
         self.pred_v = None
 
-        # We'll store exactly one checkpoint (snapshot) per cycle
-        self.snapshots = []
-
-        # For recording checkin points for plotting
+        self.snapshots = []  # one snapshot per training cycle
         self.xswa = []
         self.yswa = []
 
@@ -65,11 +59,29 @@ class ModelTrainer:
         if self.capture_every is not None:
             print(f'Capturing attention tensors every {self.capture_every}')
 
+    def _get_local_csv(self, file_name):
+        """
+        If file_name is a URL, download it and save as a temporary CSV.
+        Otherwise, return file_name as is.
+        """
+        if isinstance(file_name, str) and file_name.startswith("http"):
+            # Download CSV from URL and write to a temporary file.
+            df = pd.read_csv(file_name)
+            tmp = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv')
+            df.to_csv(tmp.name, index=False)
+            tmp.close()
+            if self.verbose:
+                print(f"Downloaded CSV from {file_name} to temporary file {tmp.name}")
+            return tmp.name
+        return file_name
+
     def load_data(self, file_name, batch_size=2**9, train=False):
         """
-        Loads data from file_name via DataHandler.
+        Loads data from a file or URL CSV via DataHandler.
         """
         self.batch_size = batch_size
+        # Allow file_name to be a URL
+        file_name = self._get_local_csv(file_name)
         inference = not train
         data_loaders = DataHandler(file_name,
                                    batch_size=batch_size,
@@ -95,50 +107,30 @@ class ModelTrainer:
             self.data_loader = data_loader
 
     def fit(self,
-            n_cycles=2,            # How many cycles to run
-            M=10,                  # Phase I (rapid rise) length
-            m=5,                   # Phase II (nose surface) length
-            alpha2=1e-4,           # LR offset
-            beta1=5e-4,            # slope for rapid rise
-            beta2=2e-4,            # slope for nose surface
-            checkin=2,             # print/plot interval in epochs
+            n_cycles=2,
+            M=10,
+            m=5,
+            alpha2=1e-4,
+            beta1=5e-4,
+            beta2=2e-4,
+            checkin=2,
             losscurve=False,
             pretrain_epochs=0):
         """
-        Train for multiple cycles. Each cycle has two phases:
-          Phase I: M epochs  (lr = alpha2 + beta1 * epoch_in_phase)
-          Phase II: m epochs (lr = beta2*((M+m) - epoch_in_cycle) + lr_end_phase1)
-
-        At the end of each cycle, exactly ONE checkpoint is saved to self.snapshots.
-
-        :param n_cycles: number of full cycles to run
-        :param M: length of the rapid rise phase
-        :param m: length of the nose surface phase
-        :param alpha2: base LR offset
-        :param beta1: slope for the rapid rise
-        :param beta2: slope for the nose surface exploring
-        :param checkin: how often (epochs) to print or plot
-        :param losscurve: whether to plot the train/val curve
-        :param pretrain_epochs: optional number of pretrain epochs at a fixed LR
+        Training routine with multiple cycles and two phases per cycle.
+        See your original code for details.
         """
         assert self.train_loader is not None, "Please load training data (train=True)."
         assert self.data_loader is not None, "Please load validation data (train=False)."
 
-        # Initialize loss trackers
         self.loss_curve = {'train': [], 'val': []}
-
-        # Define the loss function
         self.criterion = RobustL1
         if self.classification:
             print("Using BCE loss for classification task")
             self.criterion = BCEWithLogitsLoss
 
-        # Build optimizer (Lamb + optional Lookahead)
-        # base_optim = Lamb(params=self.model.parameters())
-        # self.optimizer = Lookahead(base_optimizer=base_optim)
         self.optimizer = Lamb(params=self.model.parameters())
 
-        # Optional: Pre-training at fixed LR=alpha2
         if pretrain_epochs > 0:
             print(f"Starting pre-training phase for {pretrain_epochs} epoch(s)...")
             for group in self.optimizer.param_groups:
@@ -152,7 +144,6 @@ class ModelTrainer:
                     y = self.scaler.scale(y)
 
                     src = X[:, :, 0]
-                    # print(f'src: {src.shape()}')
                     frac = X[:, :, 1]
                     frac = frac * (1 + (torch.randn_like(frac)) * self.fudge)
                     frac = torch.clamp(frac, 0, 1)
@@ -178,11 +169,9 @@ class ModelTrainer:
                 print(f"[Pretrain] Epoch {epoch+1}/{pretrain_epochs}, took {dt:.2f}s")
             print("Pre-training phase completed.\n")
 
-        # Start multi-cycle training
         total_epochs_per_cycle = M + m
-        # We'll track total epochs across all cycles for logging
         self.lr_list = []
-        global_epoch = 0  # global epoch counter across cycles
+        global_epoch = 0
 
         def set_lr(lr_value):
             for pg in self.optimizer.param_groups:
@@ -190,25 +179,18 @@ class ModelTrainer:
 
         for cycle_idx in range(n_cycles):
             print(f"\n=== Starting Cycle {cycle_idx+1}/{n_cycles} ===")
-            # Precompute LR at end of Phase I for convenience
             lr_end_phase1 = alpha2 + beta1 * (M - 1) if M > 0 else alpha2
 
             for epoch_in_cycle in range(total_epochs_per_cycle):
-                # Determine the current epoch in [0..M+m-1]
-                # Phase I: 0..M-1
-                # Phase II: M..M+m-1
                 if epoch_in_cycle < M:
-                    # Rapid rise
                     lr_current = alpha2 + beta1 * epoch_in_cycle
                 else:
-                    # Nose surface
                     lr_current = beta2 * ((M + m) - epoch_in_cycle) + lr_end_phase1
 
-                lr_current = max(lr_current, 1e-9)  # clamp LR to avoid negatives
+                lr_current = max(lr_current, 1e-9)
                 set_lr(lr_current)
                 self.lr_list.append(lr_current)
 
-                # ====== Training pass ======
                 self.model.train()
                 t0 = time()
                 for i, data in enumerate(self.train_loader):
@@ -251,7 +233,6 @@ class ModelTrainer:
 
                 global_epoch += 1
 
-                # Checkin for logging/plot
                 if (epoch_in_cycle+1) % checkin == 0 or epoch_in_cycle == 0 or epoch_in_cycle == total_epochs_per_cycle-1:
                     with torch.no_grad():
                         act_t, pred_t, _, _ = self.predict(self.train_loader)
@@ -292,7 +273,6 @@ class ModelTrainer:
                         plt.legend()
                         plt.show()
 
-            # End of the cycle => Save exactly ONE checkpoint
             snapshot = copy.deepcopy(self.model.state_dict())
             self.snapshots.append(snapshot)
             print(f"Cycle {cycle_idx+1} complete. Saved snapshot #{len(self.snapshots)}")
@@ -302,10 +282,13 @@ class ModelTrainer:
     def predict(self, loader):
         """
         Runs inference on a given DataLoader.
+        If loader is provided as a CSV file path or URL, it is processed accordingly.
         Returns: (act, pred, formulae, uncert)
         """
+        # Allow loader to be a file path or URL
         if isinstance(loader, str):
-            loader = DataHandler(loader,
+            file_name = self._get_local_csv(loader)
+            loader = DataHandler(file_name,
                                  batch_size=2**9,
                                  n_elements=self.n_elements,
                                  inference=True,
@@ -328,12 +311,10 @@ class ModelTrainer:
         with torch.no_grad():
             for i, data in enumerate(loader):
                 X, y, formula = data
-                # print(f'predict:{X[:5]}')
                 if self.capture_flag:
                     self.formula_current = list(formula) if isinstance(formula, (tuple, list)) else formula
 
                 src = X[:, :, 0]
-                # print(f'src:{src[:5]}')
                 frac = X[:, :, 1]
                 src = src.to(self.compute_device, dtype=torch.long, non_blocking=True)
                 frac = frac.to(self.compute_device, dtype=data_type_torch, non_blocking=True)
@@ -342,14 +323,12 @@ class ModelTrainer:
                 output = self.model(src, frac)
                 prediction, uncertainty = output.chunk(2, dim=-1)
 
-                # If using exponent form for uncertainty
                 uncertainty = torch.exp(uncertainty) * self.scaler.std
                 prediction = self.scaler.unscale(prediction)
                 if self.classification:
                     prediction = torch.sigmoid(prediction)
 
                 data_loc = slice(i*self.batch_size, i*self.batch_size + len(y))
-                # print(f'data_loc:{data_loc}')
                 atoms[data_loc, :] = src.cpu().numpy().astype('int32')
                 fractions[data_loc, :] = frac.cpu().numpy().astype('float32')
                 act[data_loc] = y.view(-1).cpu().numpy().astype('float32')
@@ -363,13 +342,14 @@ class ModelTrainer:
     def ensemble_predict(self, loader):
         """
         A simple ensemble inference that averages predictions
-        across all saved snapshots (one snapshot per cycle).
+        across all saved snapshots.
         """
         if not self.snapshots:
             return self.predict(loader)
 
         if isinstance(loader, str):
-            loader = DataHandler(loader,
+            file_name = self._get_local_csv(loader)
+            loader = DataHandler(file_name,
                                  batch_size=2**9,
                                  n_elements=self.n_elements,
                                  inference=True,
@@ -383,7 +363,6 @@ class ModelTrainer:
         uncert_list = []
         formulae_final = None
 
-        # Save current state
         current_state = copy.deepcopy(self.model.state_dict())
 
         for snap in self.snapshots:
@@ -395,56 +374,45 @@ class ModelTrainer:
                 act_final = act_
                 formulae_final = formulae_
 
-        # Restore the current model weights
         self.model.load_state_dict(current_state)
 
-        # Average predictions & uncertainties
         ensemble_pred = np.mean(np.stack(preds_list, axis=0), axis=0)
         ensemble_uncert = np.mean(np.stack(uncert_list, axis=0), axis=0)
 
         return act_final, ensemble_pred, formulae_final, ensemble_uncert
 
-    def ensemble_diversity(self, loader):
+    def compute_pairwise_correlations(self, data_csv):
         """
-        Calculate the average pairwise Pearson correlation between ensemble model predictions.
-        Lower correlation indicates greater diversity among models.
+        Computes the pairwise Pearson correlations of predictions from each saved snapshot.
+        The input data_csv can be a URL or local CSV file.
+        Returns a matrix of correlations.
         """
-        len_dataset = len(loader.dataset)
-        preds_list = []
-    
-        # Temporarily store current model weights
-        current_state = self.model.state_dict()
-    
-        # Collect predictions from all snapshot models
-        for snapshot in self.snapshots:
-            self.model.load_state_dict(snapshot)
-            _, preds, _, _ = self.predict(loader)
-            preds_list.append(preds)
-    
-        # Restore original model weights
+        # Convert URL CSV (if needed) to a local file name.
+        data_csv = self._get_local_csv(data_csv)
+        predictions = []
+        current_state = copy.deepcopy(self.model.state_dict())
+
+        # Compute predictions from each snapshot.
+        for idx, snap in enumerate(self.snapshots):
+            self.model.load_state_dict(snap)
+            _, pred, _, _ = self.predict(data_csv)
+            predictions.append(pred)
+
+        # Restore original model state.
         self.model.load_state_dict(current_state)
-    
-        # Convert to array for easy manipulation (snapshots x samples)
-        preds_array = np.stack(preds_list)
-    
-        # Calculate pairwise correlations
-        num_models = len(preds_list)
-        correlation_values = []
-    
-        for i in range(num_models := len(preds_list)):
-            for j in range(i + 1, num_models):
-                corr = np.corrcoef(preds_list[i], preds_list[j])[0, 1]
-                correlation_values.append(corr)
-    
-        # Calculate mean correlation
-        mean_corr = np.mean(correlation_values)
-    
-        print(f"Average pairwise correlation among {num_models} models: {mean_correlation:.4f}")
-    
-        # Restore original model state
-        self.model.load_state_dict(current_state)
-    
-        return mean_correlation, correlation_values
+
+        num_snapshots = len(predictions)
+        corr_matrix = np.eye(num_snapshots)
+        for i in range(num_snapshots):
+            for j in range(i+1, num_snapshots):
+                corr = np.corrcoef(predictions[i], predictions[j])[0, 1]
+                corr_matrix[i, j] = corr
+                corr_matrix[j, i] = corr
+
+        if self.verbose:
+            print("Pairwise Pearson correlation matrix between snapshots:")
+            print(corr_matrix)
+        return corr_matrix
 
     def save_network(self, model_name=None):
         if model_name is None:
@@ -463,14 +431,8 @@ class ModelTrainer:
     def load_network(self, path):
         path = f'models/trained_models/{path}'
         checkpoint = torch.load(path, map_location=self.compute_device)
-
-        # base_optim = Lamb(params=self.model.parameters())
-        # optimizer = Lookahead(base_optimizer=base_optim)
-        # self.optimizer = optimizer
         self.optimizer = Lamb(params=self.model.parameters())
-        
         self.scaler = Scaler(torch.zeros(3))
-
         self.model.load_state_dict(checkpoint['weights'])
         self.scaler.load_state_dict(checkpoint['scaler_state'])
         self.model_name = checkpoint['model_name']
@@ -478,4 +440,4 @@ class ModelTrainer:
 
     def feature_importance_calc(self):
         importance = interpreter(model)
-        return
+        return importance
