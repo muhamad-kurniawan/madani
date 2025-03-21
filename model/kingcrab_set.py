@@ -228,6 +228,7 @@ class CrabNetSetTransformer(nn.Module):
         self.out_dims = out_dims
         self.d_model = d_model
         self.compute_device = compute_device
+        self.n_heads=n_heads
         # Use the new Set Transformer–based encoder
         self.encoder = SetTransformerCrabEncoder(d_model=d_model,
                                                  n_heads=n_heads,
