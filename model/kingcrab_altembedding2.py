@@ -42,7 +42,7 @@ class MultiBranchFractionalEncoder(nn.Module):
     
     The final output dimension is d_model.
     """
-    def __init__(self, d_model, full_hidden_dim=64, split_hidden_dim=16, num_splits=3):
+    def __init__(self, d_model, full_hidden_dim=96, split_hidden_dim=16, num_splits=3):
         super().__init__()
         self.num_splits = num_splits
         # Calculate the output dimension for the full branch so that:
