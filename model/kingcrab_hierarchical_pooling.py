@@ -103,51 +103,6 @@ class FractionalEncoder(nn.Module):
         return out
 
 # ----------------------------
-# Hierarchical Pooling Module with Padding Support
-# ----------------------------
-class HierarchicalPooling(nn.Module):
-    """
-    Hierarchical Pooling aggregates set elements in two stages:
-      1. It splits the input set into fixed groups and computes a masked (weighted)
-         mean for each group.
-      2. It then aggregates the group summaries into a global representation using a PMA block.
-      
-    This module properly handles padded elements using a provided mask.
-    """
-    def __init__(self, d_model, n_heads, num_groups):
-        super(HierarchicalPooling, self).__init__()
-        self.num_groups = num_groups
-        # Global aggregation using a PMA block.
-        self.global_pma = PMA(d_model, n_heads, num_seeds=1)
-    
-    def forward(self, X, mask):
-        """
-        X: Tensor of shape (batch, set_size, d_model)
-        mask: Tensor of shape (batch, set_size) with 1 for valid and 0 for padded elements.
-        Returns: Tensor of shape (batch, d_model)
-        """
-        batch_size, set_size, d_model = X.shape
-        # Ensure set_size is divisible by num_groups; if not, pad further (for simplicity, we assume it is)
-        group_size = set_size // self.num_groups
-        
-        # Reshape X into groups: (batch, num_groups, group_size, d_model)
-        X_groups = X.view(batch_size, self.num_groups, group_size, d_model)
-        # Reshape mask: (batch, num_groups, group_size)
-        mask_groups = mask.view(batch_size, self.num_groups, group_size)
-        # Expand mask to match X_groups dimensions: (batch, num_groups, group_size, 1)
-        mask_groups_expanded = mask_groups.unsqueeze(-1)
-        eps = 1e-8
-        # Compute masked sum and count for each group.
-        group_sum = (X_groups * mask_groups_expanded).sum(dim=2)  # (batch, num_groups, d_model)
-        group_count = mask_groups_expanded.sum(dim=2)  # (batch, num_groups, 1)
-        group_mean = group_sum / (group_count + eps)  # (batch, num_groups, d_model)
-        
-        # Now, apply global PMA to aggregate group summaries.
-        global_summary = self.global_pma(group_mean)  # (batch, 1, d_model)
-        global_summary = global_summary.squeeze(1)  # (batch, d_model)
-        return global_summary
-
-# ----------------------------
 # PMA Block (Pooling by Multihead Attention)
 # ----------------------------
 class PMA(nn.Module):
@@ -167,14 +122,56 @@ class PMA(nn.Module):
     def forward(self, X):
         # X: (batch, set_size, d_model)
         batch_size = X.size(0)
-        # Expand seeds to (num_seeds, batch, d_model)
-        seeds = self.seed.unsqueeze(1).repeat(1, batch_size, 1)
+        # Ensure the seed is on the same device as X.
+        seeds = self.seed.to(X.device).unsqueeze(1).repeat(1, batch_size, 1)
         # Rearrange X to (set_size, batch, d_model)
         X_t = X.transpose(0, 1)
         attn_output, _ = self.mha(seeds, X_t, X_t)
         attn_output = self.ln(attn_output)
         # Transpose back to (batch, num_seeds, d_model)
         return attn_output.transpose(0, 1)
+
+# ----------------------------
+# Hierarchical Pooling Module with Padding Support
+# ----------------------------
+class HierarchicalPooling(nn.Module):
+    """
+    Hierarchical Pooling aggregates set elements in two stages:
+      1. It splits the input set into fixed groups and computes a masked mean for each group.
+      2. It aggregates the group summaries into a global representation using a PMA block.
+      
+    This module considers a provided padding mask.
+    """
+    def __init__(self, d_model, n_heads, num_groups):
+        super(HierarchicalPooling, self).__init__()
+        self.num_groups = num_groups
+        # Global aggregation using a PMA block.
+        self.global_pma = PMA(d_model, n_heads, num_seeds=1)
+    
+    def forward(self, X, mask):
+        """
+        X: Tensor of shape (batch, set_size, d_model)
+        mask: Tensor of shape (batch, set_size) with 1 for valid and 0 for padded elements.
+        Returns: Tensor of shape (batch, d_model)
+        """
+        batch_size, set_size, d_model = X.shape
+        # For hierarchical pooling, we assume set_size is divisible by num_groups.
+        group_size = set_size // self.num_groups
+        
+        # Reshape X and mask into groups.
+        X_groups = X.view(batch_size, self.num_groups, group_size, d_model)
+        mask_groups = mask.view(batch_size, self.num_groups, group_size)
+        mask_groups_expanded = mask_groups.unsqueeze(-1)  # (batch, num_groups, group_size, 1)
+        eps = 1e-8
+        # Compute masked group means.
+        group_sum = (X_groups * mask_groups_expanded).sum(dim=2)  # (batch, num_groups, d_model)
+        group_count = mask_groups_expanded.sum(dim=2)  # (batch, num_groups, 1)
+        group_mean = group_sum / (group_count + eps)  # (batch, num_groups, d_model)
+        
+        # Use the PMA block to aggregate group summaries.
+        global_summary = self.global_pma(group_mean)  # (batch, 1, d_model)
+        global_summary = global_summary.squeeze(1)  # (batch, d_model)
+        return global_summary
 
 # ----------------------------
 # Encoder Module with Hierarchical Pooling
@@ -223,15 +220,16 @@ class Encoder(nn.Module):
         # Obtain element embeddings.
         x = self.embed(src) * 2 ** self.emb_scaler  # (batch, set_size, d_model)
         
-        # Compute a simple mask from src: valid if index != 0.
-        # Mask shape: (batch, set_size), with 1 for valid and 0 for padded elements.
+        # Create a padding mask from src: valid if index != 0.
+        # Shape: (batch, set_size) with 1 for valid and 0 for padded.
         pad_mask = (src != 0).float()
         
+        # Compute a secondary mask from frac (if needed).
         mask = frac.unsqueeze(dim=-1)
         mask = torch.matmul(mask, mask.transpose(-2, -1))
         mask[mask != 0] = 1
         src_mask = mask[:, 0] != 1  # for transformer
-
+        
         # Compute fractional encodings.
         pe = torch.zeros_like(x)
         ple = torch.zeros_like(x)
@@ -249,14 +247,12 @@ class Encoder(nn.Module):
         if self.fractional:
             x = x * frac.unsqueeze(2).repeat(1, 1, self.d_model)
         
-        # Apply the mask to ensure padded elements do not contribute.
-        # Expand pad_mask to shape (batch, set_size, d_model)
+        # Apply the padding mask to zero out padded elements.
         pad_mask_exp = pad_mask.unsqueeze(-1).repeat(1, 1, self.d_model)
         x = x * pad_mask_exp
         
         # Use Hierarchical Pooling to aggregate the set.
         if self.use_hier_pool:
-            # HierarchicalPooling expects a mask of shape (batch, set_size) with 1 for valid, 0 for pad.
             x = HierarchicalPooling(self.d_model, self.heads, self.num_groups)(x, pad_mask)
         
         return x
@@ -313,16 +309,15 @@ class CrabNet(nn.Module):
 if __name__ == '__main__':
     # Example parameters
     batch_size = 4
-    set_size = 6  # For demonstration, use a set size that is divisible by num_groups (e.g. 6 with 2 groups -> group_size=3)
+    set_size = 6  # For demonstration, choose a set size divisible by num_groups (e.g., 6 with 2 groups -> group_size=3)
     vocab_size = 100  # Assume 100 possible element types (0 is reserved for padding)
     d_model = 128  # For demonstration purposes
-    out_dims = 1024  # Must be even; e.g., splitting into two halves of 512
+    out_dims = 1024  # Must be even; e.g., for splitting into two halves of 512
 
     # Create dummy element indices and fractional amounts.
-    # Here, some entries will be padding (set to 0)
+    # Some entries will be padding (set to 0).
     src = torch.randint(1, vocab_size, (batch_size, set_size))
-    # For demonstration, set last column to 0 to simulate padding.
-    src[:, -1] = 0
+    src[:, -1] = 0  # Simulate padding in the last column.
     frac = torch.rand(batch_size, set_size, 1)
 
     # Instantiate the model.
