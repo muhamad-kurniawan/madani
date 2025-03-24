@@ -195,7 +195,7 @@ class MoEFeedForwardTop2(nn.Module):
     """
     def __init__(self, 
                  d_model, 
-                 dim_feedforward=2048, 
+                 dim_feedforward=1024, 
                  dropout=0.1, 
                  num_experts=4, 
                  gating_noise=0.0):
