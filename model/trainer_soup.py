@@ -124,7 +124,8 @@ class ModelTrainer:
         optimizer = base_optim
         # Initialize the SWA wrapper with chosen parameters.
         # Note: In PyTorch 2.0 the automatic SWA update via step prehook is removed.
-        self.optimizer = SWA(optimizer, swa_start=2, swa_freq=10, swa_lr=1e-3)
+        # self.optimizer = SWA(optimizer, swa_start=2, swa_freq=10, swa_lr=1e-3)
+        self.optimizer = optimizer
 
         # Cyclical LR scheduler (per-step update)
         lr_scheduler = CyclicLR(self.optimizer,
@@ -389,7 +390,8 @@ class ModelTrainer:
         base_optim = Lamb(params=self.model.parameters())
         # optimizer = Lookahead(base_optimizer=base_optim)
         optimizer = base_optim
-        self.optimizer = SWA(optimizer)
+        # self.optimizer = SWA(optimizer)
+        self.optimizer = optimizer
 
         # Recreate scaler
         self.scaler = Scaler(torch.zeros(3))
