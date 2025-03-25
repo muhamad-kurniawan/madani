@@ -180,8 +180,8 @@ class ModelTrainer:
         """
         if optim_params is None:
             optim_params = {
-                'base_lr': 1e-3,   # higher LR for pretraining
-                'max_lr': 1e-2,
+                'base_lr': 1e-4,   # higher LR for pretraining
+                'max_lr': 6e-3,
                 'lr_decay': 1.0,   # no decay during pretraining (or set <1.0 to decay)
                 'epochs_step': 1,
             }
