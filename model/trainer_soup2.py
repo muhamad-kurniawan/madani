@@ -92,7 +92,8 @@ class ModelTrainer:
 
         # Create optimizer (Lamb wrapped in Lookahead; no SWA here)
         base_optim = Lamb(params=self.model.parameters())
-        optimizer = Lookahead(base_optimizer=base_optim)
+        # optimizer = Lookahead(base_optimizer=base_optim)
+        optimizer = base_optim
         self.optimizer = optimizer
 
         # Get LR parameters from optim_params
@@ -303,7 +304,8 @@ class ModelTrainer:
         path = os.path.join('models', 'trained_models', path)
         checkpoint = torch.load(path, map_location=self.compute_device)
         base_optim = Lamb(params=self.model.parameters())
-        optimizer = Lookahead(base_optimizer=base_optim)
+        # optimizer = Lookahead(base_optimizer=base_optim)
+        optimizer = base_optim
         self.optimizer = optimizer
         self.scaler = Scaler(torch.zeros(3))
         self.model.load_state_dict(checkpoint['weights'])
