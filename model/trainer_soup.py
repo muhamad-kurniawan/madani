@@ -120,7 +120,8 @@ class ModelTrainer:
         # Build an optimizer and SWA wrapper.
         # (Here we assume your custom SWA class is used with manual updates.)
         base_optim = Lamb(params=self.model.parameters())
-        optimizer = Lookahead(base_optimizer=base_optim)
+        # optimizer = Lookahead(base_optimizer=base_optim)
+        optimizer = base_optim
         # Initialize the SWA wrapper with chosen parameters.
         # Note: In PyTorch 2.0 the automatic SWA update via step prehook is removed.
         self.optimizer = SWA(optimizer, swa_start=2, swa_freq=10, swa_lr=1e-3)
@@ -386,7 +387,8 @@ class ModelTrainer:
 
         # Recreate the same optimizer structure (SWA, Lookahead, Lamb)
         base_optim = Lamb(params=self.model.parameters())
-        optimizer = Lookahead(base_optimizer=base_optim)
+        # optimizer = Lookahead(base_optimizer=base_optim)
+        optimizer = base_optim
         self.optimizer = SWA(optimizer)
 
         # Recreate scaler
