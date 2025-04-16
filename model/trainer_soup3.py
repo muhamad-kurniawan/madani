@@ -281,7 +281,7 @@ class ModelTrainer:
             self.model.load_state_dict(new_soup)
             act_v, pred_v, _, _ = self.predict(self.data_loader)
             new_score = mean_absolute_error(act_v, pred_v)
-            print(f"Trying candidate {idx+1}: new MAE = {new_score:.4f} vs current MAE = {current_score:.4f}")
+            print(f"Trying candidate {idx+1}: new MAE = {new_score} vs current MAE = {current_score}")
             if new_score < current_score:
                 # Accept the candidate into the soup
                 print(f"Candidate {idx+1} accepted.")
@@ -319,15 +319,12 @@ class ModelTrainer:
             self.model.load_state_dict(pretrained_state)
             self.finetune(epochs=epochs, checkin=checkin, optim_params=config)
             act_v, pred_v, _, _ = self.predict(self.data_loader)
-
-            print("Sample target:", act_v[:5])
-            print("Sample prediction (unscaled):", pred_v[:5])
             
             mae_v = mean_absolute_error(act_v, pred_v)
             # candidate_state_dicts.append(self.model.state_dict().copy())
             candidate_state_dicts.append(copy.deepcopy(self.model.state_dict()))
             candidate_scores.append(mae_v)
-            print(f"Variant {i+1} validation MAE: {mae_v:.4f}")
+            print(f"Variant {i+1} validation MAE: {mae_v}")
 
         n_candidates = len(candidate_state_dicts)
         best_random_score = float('inf')
@@ -348,7 +345,7 @@ class ModelTrainer:
             act_v, pred_v, _, _ = self.predict(self.data_loader)
 
             random_mae = mean_absolute_error(act_v, pred_v)
-            print(f"Random soup sample {sample+1}: MAE = {random_mae:.4f}")
+            print(f"Random soup sample {sample+1}: MAE = {random_mae}")
             if random_mae < best_random_score:
                 best_random_score = random_mae
                 best_random_soup = random_soup
@@ -356,7 +353,7 @@ class ModelTrainer:
 
         # Load the best-performing random soup into the model
         self.model.load_state_dict(best_random_soup)
-        print(f"\nBest random soup achieved MAE: {best_random_score:.4f}")
+        print(f"\nBest random soup achieved MAE: {best_random_score}")
         print("Best soup coefficients (per candidate):", best_coeffs)
          
     def predict(self, loader_test):
