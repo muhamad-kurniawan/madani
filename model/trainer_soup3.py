@@ -342,6 +342,10 @@ class ModelTrainer:
             # Load the random soup and evaluate on the validation set
             self.model.load_state_dict(random_soup)
             act_v, pred_v, _, _ = self.predict(self.data_loader)
+            
+            print("Sample target:", act_v.view(-1)[:5].cpu().numpy())
+            print("Sample prediction (unscaled):", pred_v.view(-1)[:5].cpu().numpy())
+
             random_mae = mean_absolute_error(act_v, pred_v)
             print(f"Random soup sample {sample+1}: MAE = {random_mae:.4f}")
             if random_mae < best_random_score:
