@@ -295,6 +295,62 @@ class ModelTrainer:
         print("\nGreedy model soup has been created and loaded into the model.")
         print("Included candidate models:", [i+1 for i in greedy_indices])
 
+     def finetune_variants_for_random_soup(self, variant_configs, epochs=20, checkin=2, num_samples=10):
+        """
+        Starting from the pretrained model, perform several fine-tuning runs using variant
+        hyperparameters. Then, generate a number of random combinations of the candidate 
+        models' weights and choose the soup that yields the lowest validation MAE.
+        
+        Args:
+            variant_configs (list of dict): List of hyperparameter dictionaries.
+            num_samples (int): Number of random weight combinations to try.
+        """
+        print("\n=== Finetuning Variants for Random Soup ===")
+        # Save the pretrained state
+        pretrained_state = self.model.state_dict()
+        candidate_state_dicts = []
+        candidate_scores = []
+
+        # Fine-tune each variant and evaluate on the validation set.
+        for i, config in enumerate(variant_configs):
+            print(f"\n--- Variant {i+1}/{len(variant_configs)} ---")
+            self.model.load_state_dict(pretrained_state)
+            self.finetune(epochs=epochs, checkin=checkin, optim_params=config)
+            act_v, pred_v, _, _ = self.predict(self.data_loader)
+            mae_v = mean_absolute_error(act_v, pred_v)
+            candidate_state_dicts.append(self.model.state_dict().copy())
+            candidate_scores.append(mae_v)
+            print(f"Variant {i+1} validation MAE: {mae_v:.4f}")
+
+        n_candidates = len(candidate_state_dicts)
+        best_random_score = float('inf')
+        best_random_soup = None
+        best_coeffs = None
+
+        # Try a number of random combinations
+        for sample in range(num_samples):
+            # Create random coefficients that sum to 1
+            coeffs = np.random.dirichlet(np.ones(n_candidates))
+            random_soup = {}
+            for key in candidate_state_dicts[0].keys():
+                # Compute the weighted average for this parameter across all candidate models
+                weighted_sum = sum(coeffs[i] * candidate_state_dicts[i][key] for i in range(n_candidates))
+                random_soup[key] = weighted_sum
+            # Load the random soup and evaluate on the validation set
+            self.model.load_state_dict(random_soup)
+            act_v, pred_v, _, _ = self.predict(self.data_loader)
+            random_mae = mean_absolute_error(act_v, pred_v)
+            print(f"Random soup sample {sample+1}: MAE = {random_mae:.4f}")
+            if random_mae < best_random_score:
+                best_random_score = random_mae
+                best_random_soup = random_soup
+                best_coeffs = coeffs
+
+        # Load the best-performing random soup into the model
+        self.model.load_state_dict(best_random_soup)
+        print(f"\nBest random soup achieved MAE: {best_random_score:.4f}")
+        print("Best soup coefficients (per candidate):", best_coeffs)
+         
     def predict(self, loader_test):
         """
         Runs inference on a given DataLoader.
