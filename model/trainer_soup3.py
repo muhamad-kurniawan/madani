@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
+import copy
 import torch
 from time import time
 import matplotlib.pyplot as plt
@@ -254,7 +255,8 @@ class ModelTrainer:
             # Get predictions on validation set and compute error
             act_v, pred_v, _, _ = self.predict(self.data_loader)
             mae_v = mean_absolute_error(act_v, pred_v)
-            candidate_state_dicts.append(self.model.state_dict().copy())
+            # candidate_state_dicts.append(self.model.state_dict().copy())
+            candidate_state_dicts.append(copy.deepcopy(self.model.state_dict()))
             candidate_scores.append(mae_v)
             print(f"Variant {i+1} validation MAE: {mae_v:.4f}")
 
@@ -318,7 +320,8 @@ class ModelTrainer:
             self.finetune(epochs=epochs, checkin=checkin, optim_params=config)
             act_v, pred_v, _, _ = self.predict(self.data_loader)
             mae_v = mean_absolute_error(act_v, pred_v)
-            candidate_state_dicts.append(self.model.state_dict().copy())
+            # candidate_state_dicts.append(self.model.state_dict().copy())
+            candidate_state_dicts.append(copy.deepcopy(self.model.state_dict()))
             candidate_scores.append(mae_v)
             print(f"Variant {i+1} validation MAE: {mae_v:.4f}")
 
