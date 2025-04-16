@@ -320,8 +320,8 @@ class ModelTrainer:
             self.finetune(epochs=epochs, checkin=checkin, optim_params=config)
             act_v, pred_v, _, _ = self.predict(self.data_loader)
 
-            print("Sample target:", act_v[:5].numpy())
-            print("Sample prediction (unscaled):", pred_v[:5].numpy())
+            print("Sample target:", act_v[:5])
+            print("Sample prediction (unscaled):", pred_v[:5])
             
             mae_v = mean_absolute_error(act_v, pred_v)
             # candidate_state_dicts.append(self.model.state_dict().copy())
