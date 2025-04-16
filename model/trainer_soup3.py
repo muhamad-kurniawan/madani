@@ -319,6 +319,10 @@ class ModelTrainer:
             self.model.load_state_dict(pretrained_state)
             self.finetune(epochs=epochs, checkin=checkin, optim_params=config)
             act_v, pred_v, _, _ = self.predict(self.data_loader)
+
+            print("Sample target:", act_v[:5].cpu().numpy())
+            print("Sample prediction (unscaled):", pred_v[:5].cpu().numpy())
+            
             mae_v = mean_absolute_error(act_v, pred_v)
             # candidate_state_dicts.append(self.model.state_dict().copy())
             candidate_state_dicts.append(copy.deepcopy(self.model.state_dict()))
@@ -342,9 +346,6 @@ class ModelTrainer:
             # Load the random soup and evaluate on the validation set
             self.model.load_state_dict(random_soup)
             act_v, pred_v, _, _ = self.predict(self.data_loader)
-            
-            print("Sample target:", act_v.view(-1)[:5].cpu().numpy())
-            print("Sample prediction (unscaled):", pred_v.view(-1)[:5].cpu().numpy())
 
             random_mae = mean_absolute_error(act_v, pred_v)
             print(f"Random soup sample {sample+1}: MAE = {random_mae:.4f}")
