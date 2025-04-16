@@ -295,7 +295,7 @@ class ModelTrainer:
         print("\nGreedy model soup has been created and loaded into the model.")
         print("Included candidate models:", [i+1 for i in greedy_indices])
 
-     def finetune_variants_for_random_soup(self, variant_configs, epochs=20, checkin=2, num_samples=10):
+    def finetune_variants_for_random_soup(self, variant_configs, epochs=20, checkin=2, num_samples=10):
         """
         Starting from the pretrained model, perform several fine-tuning runs using variant
         hyperparameters. Then, generate a number of random combinations of the candidate 
