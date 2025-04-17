@@ -84,7 +84,7 @@ class ModelTrainer:
         print(f"\n--- Starting {phase_name} phase for {epochs} epochs ---")
         self.criterion = RobustL1 if not self.classification else BCEWithLogitsLoss
 
-        # Optimizer and CyclicLR setup
+        # Setup optimizer and scheduler
         base_optim = Lamb(params=self.model.parameters())
         self.optimizer = base_optim
 
@@ -102,16 +102,16 @@ class ModelTrainer:
             step_size_up=step_size
         )
 
-        # Track best model only after LR peak
+        # Track first peak and best model after that
+        peak_reached = False
+        peak_epoch = None
         best_val_mae = float('inf')
         best_state = copy.deepcopy(self.model.state_dict())
-        peak_reached = False
-        peak_lr = max_lr
 
         for epoch in range(epochs):
             self.model.train()
             for X, y, formula in self.train_loader:
-                # preprocess inputs
+                # Preprocess inputs
                 y = self.scaler.scale(y)
                 src = X[:, :, 0]
                 frac = X[:, :, 1]
@@ -124,7 +124,7 @@ class ModelTrainer:
                 frac = frac.to(self.compute_device, dtype=data_type_torch)
                 y = y.to(self.compute_device, dtype=data_type_torch)
 
-                # forward + backward
+                # Forward and backward pass
                 output = self.model(src, frac)
                 pred, uncert = output.chunk(2, dim=-1)
                 loss = self.criterion(
@@ -136,28 +136,29 @@ class ModelTrainer:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-                # step LR and detect peak
+                # Step the LR and detect the first peak
                 self.lr_scheduler.step()
                 curr_lr = self.lr_scheduler.get_last_lr()[0]
-                if not peak_reached and curr_lr >= peak_lr * 0.999:
+                if not peak_reached and abs(curr_lr - max_lr) < 1e-8:
                     peak_reached = True
+                    peak_epoch = epoch
                     if self.verbose:
                         print(f"Learning rate peak reached at epoch {epoch}")
 
-            # validation check
+            # Validation checkpoints
             if (epoch + 1) % checkin == 0 or epoch == 0 or epoch == epochs - 1:
                 with torch.no_grad():
                     act_v, pred_v, _, _ = self.predict(self.data_loader)
                 mae_v = mean_absolute_error(act_v, pred_v)
                 print(f"{phase_name} Epoch {epoch}/{epochs} — val MAE={mae_v:.4g}")
 
-                # save only if peak was reached
-                if peak_reached and mae_v < best_val_mae:
+                # Only save if after the LR peak
+                if peak_reached and epoch >= peak_epoch and mae_v < best_val_mae:
                     best_val_mae = mae_v
                     best_state = copy.deepcopy(self.model.state_dict())
                     print(f" New best after peak at epoch {epoch}, MAE={mae_v:.4g}")
 
-            # optionally adjust LR boundaries
+            # Optionally adjust LR boundaries for decay
             if lr_decay < 1.0:
                 new_base = base_lr * (lr_decay ** (epoch + 1))
                 new_max = max_lr * (lr_decay ** (epoch + 1))
@@ -169,7 +170,7 @@ class ModelTrainer:
                     step_size_up=step_size
                 )
 
-        # load & save best state
+        # At phase end, load and save the best post-peak model
         self.model.load_state_dict(best_state)
         print(f"Loaded best {phase_name} model after peak (val MAE={best_val_mae:.4g})")
         self.save_network(model_name=f"{self.model_name}_{phase_name}_best")
@@ -185,6 +186,7 @@ class ModelTrainer:
             optim_params = dict(base_lr=1e-4, max_lr=6e-3, lr_decay=0.98, epochs_step=1)
         print("\n=== Fine-tuning Phase ===")
         self._train_phase("Fine-tuning", epochs, checkin, optim_params)
+
 
     def finetune_variants_for_soup(self, variant_configs, epochs=20, checkin=2):
         """
