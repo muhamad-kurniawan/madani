@@ -1,16 +1,14 @@
 import os
 import numpy as np
-import pandas as pd
 import copy
 import torch
 from time import time
-import matplotlib.pyplot as plt
 from torch.optim.lr_scheduler import CyclicLR
-from sklearn.metrics import mean_absolute_error, roc_auc_score
+from sklearn.metrics import mean_absolute_error
 
 from madani.utils.scaling import Scaler, DummyScaler
 from madani.utils.optims_update import RobustL1, BCEWithLogitsLoss
-from madani.utils.optims_update import Lamb, Lookahead
+from madani.utils.optims_update import Lamb
 from madani.utils.utils import count_parameters, get_compute_device
 from madani.utils.input_processing import DataHandler, data_type_torch
 
@@ -32,161 +30,136 @@ class ModelTrainer:
         self.train_loader = None
         self.classification = False
         self.n_elements = n_elements
-        self.compute_device = model.compute_device
-        self.fudge = 0.02  # random scaling factor for fraction "jitter"
+        self.compute_device = model.compute_device or get_compute_device()
+        self.fudge = 0.02
         self.capture_every = capture_every
         self.verbose = verbose
         self.drop_unary = drop_unary
         self.scale = scale
 
-        # For optional attention capture
+        # attention capture
         self.capture_flag = False
         self.formula_current = None
-        self.act_v = None
-        self.pred_v = None
-
-        if self.compute_device is None:
-            self.compute_device = get_compute_device()
 
         if self.verbose:
-            print('\nModel architecture: out_dims, d_model, N, heads')
-            print(f'{self.model.out_dims}, {self.model.d_model}, '
-                  f'{self.model.N}, {self.model.heads}')
-            print(f'Running on compute device: {self.compute_device}')
-            print(f'Model size: {count_parameters(self.model)} parameters\n')
-        if self.capture_every is not None:
-            print(f'Capturing attention tensors every {self.capture_every}')
+            print(f"\nModel: out_dims={model.out_dims}, d_model={model.d_model}, N={model.N}, heads={model.heads}")
+            print(f"Device: {self.compute_device}, Params: {count_parameters(model)}\n")
 
     def load_data(self, file_name, batch_size=2**9, train=False):
         self.batch_size = batch_size
-        inference = not train
-        data_loaders = DataHandler(
+        dh = DataHandler(
             file_name,
             batch_size=batch_size,
             n_elements=self.n_elements,
-            inference=inference,
+            inference=not train,
             verbose=self.verbose,
             drop_unary=self.drop_unary,
             scale=self.scale
         )
-
-        print(f'Loading data with up to {data_loaders.n_elements:0.0f} elements in the formula')
-        self.n_elements = data_loaders.n_elements
-        data_loader = data_loaders.get_data_loaders(inference=inference)
-        y = data_loader.dataset.y
+        self.n_elements = dh.n_elements
+        loader = dh.get_data_loaders(inference=not train)
         if train:
-            self.train_len = len(y)
+            y = loader.dataset.y
             self.scaler = DummyScaler(y) if self.classification else Scaler(y)
-            self.train_loader = data_loader
-        self.data_loader = data_loader
+            self.train_loader = loader
+        self.data_loader = loader
 
     def _train_phase(self, phase_name, epochs, checkin, optim_params):
-        print(f"\n--- Starting {phase_name} phase for {epochs} epochs ---")
+        print(f"\n--- {phase_name} for {epochs} epochs ---")
         self.criterion = RobustL1 if not self.classification else BCEWithLogitsLoss
-
-        # Setup optimizer and scheduler
-        base_optim = Lamb(params=self.model.parameters())
-        self.optimizer = base_optim
+        self.optimizer = Lamb(params=self.model.parameters())
 
         base_lr = optim_params.get('base_lr', 1e-4)
         max_lr = optim_params.get('max_lr', 6e-3)
         lr_decay = optim_params.get('lr_decay', 1.0)
-        epochs_step = optim_params.get('epochs_step', 1)
-        step_size = epochs_step * len(self.train_loader)
+        steps = optim_params.get('epochs_step', 1) * len(self.train_loader)
 
         self.lr_scheduler = CyclicLR(
             self.optimizer,
             base_lr=base_lr,
             max_lr=max_lr,
             cycle_momentum=False,
-            step_size_up=step_size
+            step_size_up=steps
         )
 
-        # Track first peak and best model after that
-        peak_reached = False
-        peak_epoch = None
         best_val_mae = float('inf')
         best_state = copy.deepcopy(self.model.state_dict())
+        peak_reached = False
+        peak_epoch = -1
 
         for epoch in range(epochs):
             self.model.train()
-            for X, y, formula in self.train_loader:
-                # Preprocess inputs
-                y = self.scaler.scale(y)
+            for X, y, _ in self.train_loader:
+                # preprocess
+                y_scaled = self.scaler.scale(y)
                 src = X[:, :, 0]
-                frac = X[:, :, 1]
-                frac = frac * (1 + torch.randn_like(frac) * self.fudge)
+                frac = X[:, :, 1] * (1 + torch.randn_like(X[:, :, 1]) * self.fudge)
                 frac = torch.clamp(frac, 0, 1)
                 frac[src == 0] = 0
                 frac = frac / frac.sum(dim=1, keepdim=True)
 
                 src = src.to(self.compute_device, dtype=torch.long)
                 frac = frac.to(self.compute_device, dtype=data_type_torch)
-                y = y.to(self.compute_device, dtype=data_type_torch)
+                y_scaled = y_scaled.to(self.compute_device, dtype=data_type_torch)
 
-                # Forward and backward pass
-                output = self.model(src, frac)
-                pred, uncert = output.chunk(2, dim=-1)
+                out = self.model(src, frac)
+                pred, uncert = out.chunk(2, dim=-1)
                 loss = self.criterion(
-                    pred.reshape(-1),
-                    uncert.reshape(-1),
-                    y.reshape(-1)
+                    pred.view(-1), uncert.view(-1), y_scaled.view(-1)
                 )
                 loss.backward()
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-                # Step the LR and detect the first peak
+                # LR step + detect first peak
                 self.lr_scheduler.step()
                 curr_lr = self.lr_scheduler.get_last_lr()[0]
-                if not peak_reached and abs(curr_lr - max_lr) < 1e-8:
+                max_lr_now = self.lr_scheduler.max_lrs[0]
+                if not peak_reached and curr_lr >= max_lr_now - 1e-6:
                     peak_reached = True
                     peak_epoch = epoch
                     if self.verbose:
-                        print(f"Learning rate peak reached at epoch {epoch}")
+                        print(f"LR peak reached at epoch {epoch}")
 
-            # Validation checkpoints
-            if (epoch + 1) % checkin == 0 or epoch == 0 or epoch == epochs - 1:
+            # validation & save only after peak
+            if (epoch + 1) % checkin == 0 or epoch in (0, epochs - 1):
                 with torch.no_grad():
-                    act_v, pred_v, _, _ = self.predict(self.data_loader)
-                mae_v = mean_absolute_error(act_v, pred_v)
+                    act, pred, *_ = self.predict(self.data_loader)
+                mae_v = mean_absolute_error(act, pred)
                 print(f"{phase_name} Epoch {epoch}/{epochs} — val MAE={mae_v:.4g}")
-
-                # Only save if after the LR peak
                 if peak_reached and epoch >= peak_epoch and mae_v < best_val_mae:
                     best_val_mae = mae_v
                     best_state = copy.deepcopy(self.model.state_dict())
-                    print(f" New best after peak at epoch {epoch}, MAE={mae_v:.4g}")
+                    print(f" New best post-peak at epoch {epoch}, MAE={mae_v:.4g}")
 
-            # Optionally adjust LR boundaries for decay
+            # decay LR boundaries if requested
             if lr_decay < 1.0:
-                new_base = base_lr * (lr_decay ** (epoch + 1))
-                new_max = max_lr * (lr_decay ** (epoch + 1))
+                new_b = base_lr * (lr_decay ** (epoch + 1))
+                new_m = max_lr * (lr_decay ** (epoch + 1))
                 self.lr_scheduler = CyclicLR(
                     self.optimizer,
-                    base_lr=new_base,
-                    max_lr=new_max,
+                    base_lr=new_b,
+                    max_lr=new_m,
                     cycle_momentum=False,
-                    step_size_up=step_size
+                    step_size_up=steps
                 )
 
-        # At phase end, load and save the best post-peak model
+        # load & save best
         self.model.load_state_dict(best_state)
-        print(f"Loaded best {phase_name} model after peak (val MAE={best_val_mae:.4g})")
+        print(f"Loaded best {phase_name} post-peak (MAE={best_val_mae:.4g})")
         self.save_network(model_name=f"{self.model_name}_{phase_name}_best")
 
     def pretrain(self, epochs=10, checkin=2, optim_params=None):
-        if optim_params is None:
+        if not optim_params:
             optim_params = dict(base_lr=1e-4, max_lr=6e-3, lr_decay=1.0, epochs_step=1)
-        print("\n=== Pretraining Phase ===")
+        print("\n=== Pretraining ===")
         self._train_phase("Pretraining", epochs, checkin, optim_params)
 
     def finetune(self, epochs=20, checkin=2, optim_params=None):
-        if optim_params is None:
+        if not optim_params:
             optim_params = dict(base_lr=1e-4, max_lr=6e-3, lr_decay=0.98, epochs_step=1)
-        print("\n=== Fine-tuning Phase ===")
+        print("\n=== Fine-tuning ===")
         self._train_phase("Fine-tuning", epochs, checkin, optim_params)
-
 
     def finetune_variants_for_soup(self, variant_configs, epochs=20, checkin=2):
         """
