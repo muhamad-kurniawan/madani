@@ -113,9 +113,8 @@ class ModelTrainer:
 
                 # LR step + detect first peak
                 self.lr_scheduler.step()
-                curr_lr = self.lr_scheduler.get_last_lr()[0]
-                max_lr_now = self.lr_scheduler.max_lrs[0]
-                if not peak_reached and curr_lr >= max_lr_now - 1e-12:
+                # Detect first peak when internal step counter equals step_size_up
+                if not peak_reached and self.lr_scheduler._step_count >= steps:
                     peak_reached = True
                     peak_epoch = epoch
                     if self.verbose:
@@ -126,11 +125,11 @@ class ModelTrainer:
                 with torch.no_grad():
                     act, pred, *_ = self.predict(self.data_loader)
                 mae_v = mean_absolute_error(act, pred)
-                print(f"{phase_name} Epoch {epoch}/{epochs} — val MAE={mae_v}")
+                print(f"{phase_name} Epoch {epoch}/{epochs} — val MAE={mae_v:.4g}")
                 if peak_reached and epoch >= peak_epoch and mae_v < best_val_mae:
                     best_val_mae = mae_v
                     best_state = copy.deepcopy(self.model.state_dict())
-                    print(f" New best post-peak at epoch {epoch}, MAE={mae_v}")
+                    print(f" New best post-peak at epoch {epoch}, MAE={mae_v:.4g}")
 
             # decay LR boundaries if requested
             if lr_decay < 1.0:
@@ -146,7 +145,7 @@ class ModelTrainer:
 
         # load & save best
         self.model.load_state_dict(best_state)
-        print(f"Loaded best {phase_name} post-peak (MAE={best_val_mae})")
+        print(f"Loaded best {phase_name} post-peak (MAE={best_val_mae:.4g})")
         self.save_network(model_name=f"{self.model_name}_{phase_name}_best")
 
     def pretrain(self, epochs=10, checkin=2, optim_params=None):
