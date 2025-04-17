@@ -220,11 +220,11 @@ class ModelTrainer:
             # candidate_state_dicts.append(self.model.state_dict().copy())
             candidate_state_dicts.append(copy.deepcopy(self.model.state_dict()))
             candidate_scores.append(mae_v)
-            print(f"Variant {i+1} validation MAE: {mae_v:.4f}")
+            print(f"Variant {i+1} validation MAE: {mae_v}")
 
         # Begin greedy soup: start with the best candidate (lowest MAE)
         best_index = np.argmin(candidate_scores)
-        print(f"\nStarting greedy soup with candidate {best_index+1} (MAE: {candidate_scores[best_index]:.4f})")
+        print(f"\nStarting greedy soup with candidate {best_index+1} (MAE: {candidate_scores[best_index]})")
         current_soup = candidate_state_dicts[best_index]
         current_count = 1
         current_score = candidate_scores[best_index]
