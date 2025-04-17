@@ -2,163 +2,166 @@ import os
 import numpy as np
 import copy
 import torch
-from time import time
 from torch.optim.lr_scheduler import CyclicLR
 from sklearn.metrics import mean_absolute_error
 
 from madani.utils.scaling import Scaler, DummyScaler
-from madani.utils.optims_update import RobustL1, BCEWithLogitsLoss
-from madani.utils.optims_update import Lamb
+from madani.utils.optims_update import RobustL1, BCEWithLogitsLoss, Lamb
 from madani.utils.utils import count_parameters, get_compute_device
 from madani.utils.input_processing import DataHandler, data_type_torch
 
 
 class ModelTrainer:
-    def __init__(
-        self,
-        model,
-        model_name='UnnamedModel',
-        n_elements=8,
-        capture_every=None,
-        verbose=True,
-        drop_unary=True,
-        scale=True
-    ):
+    """Trainer that saves the best checkpoint **after the first LR peak** in a CyclicLR schedule."""
+
+    def __init__(self, model, model_name='UnnamedModel', n_elements=8,
+                 capture_every=None, verbose=True, drop_unary=True, scale=True):
         self.model = model
         self.model_name = model_name
-        self.data_loader = None
-        self.train_loader = None
-        self.classification = False
         self.n_elements = n_elements
-        self.compute_device = model.compute_device or get_compute_device()
-        self.fudge = 0.02
         self.capture_every = capture_every
         self.verbose = verbose
         self.drop_unary = drop_unary
         self.scale = scale
+        self.fudge = 0.02
+        self.classification = False
 
-        # attention capture
-        self.capture_flag = False
-        self.formula_current = None
-
-        if self.verbose:
+        self.compute_device = model.compute_device or get_compute_device()
+        if verbose:
             print(f"\nModel: out_dims={model.out_dims}, d_model={model.d_model}, N={model.N}, heads={model.heads}")
-            print(f"Device: {self.compute_device}, Params: {count_parameters(model)}\n")
+            print(f"Device: {self.compute_device}, parameters: {count_parameters(model)}\n")
 
+        # placeholders
+        self.data_loader = None
+        self.train_loader = None
+        self.scaler = None
+        self.capture_flag = False
+
+    # ---------------------------------------------------------------------
+    # Data
+    # ---------------------------------------------------------------------
     def load_data(self, file_name, batch_size=2**9, train=False):
-        self.batch_size = batch_size
-        dh = DataHandler(
-            file_name,
-            batch_size=batch_size,
-            n_elements=self.n_elements,
-            inference=not train,
-            verbose=self.verbose,
-            drop_unary=self.drop_unary,
-            scale=self.scale
-        )
+        dh = DataHandler(file_name, batch_size=batch_size, n_elements=self.n_elements,
+                         inference=not train, verbose=self.verbose,
+                         drop_unary=self.drop_unary, scale=self.scale)
         self.n_elements = dh.n_elements
         loader = dh.get_data_loaders(inference=not train)
+        self.data_loader = loader
         if train:
+            self.train_loader = loader
             y = loader.dataset.y
             self.scaler = DummyScaler(y) if self.classification else Scaler(y)
-            self.train_loader = loader
-        self.data_loader = loader
 
+    # ---------------------------------------------------------------------
+    # Core training loop
+    # ---------------------------------------------------------------------
     def _train_phase(self, phase_name, epochs, checkin, optim_params):
-        print(f"\n--- {phase_name} for {epochs} epochs ---")
-        self.criterion = RobustL1 if not self.classification else BCEWithLogitsLoss
-        self.optimizer = Lamb(params=self.model.parameters())
+        print(f"\n--- {phase_name}: {epochs} epochs ---")
+        criterion = RobustL1 if not self.classification else BCEWithLogitsLoss
+        self.optimizer = Lamb(self.model.parameters())
 
         base_lr = optim_params.get('base_lr', 1e-4)
         max_lr = optim_params.get('max_lr', 6e-3)
         lr_decay = optim_params.get('lr_decay', 1.0)
-        steps = optim_params.get('epochs_step', 1) * len(self.train_loader)
+        steps_up = optim_params.get('epochs_step', 1) * len(self.train_loader)
+        scheduler = CyclicLR(self.optimizer, base_lr=base_lr, max_lr=max_lr,
+                             step_size_up=steps_up, cycle_momentum=False)
 
-        self.lr_scheduler = CyclicLR(
-            self.optimizer,
-            base_lr=base_lr,
-            max_lr=max_lr,
-            cycle_momentum=False,
-            step_size_up=steps
-        )
-
-        best_val_mae = float('inf')
+        best_mae = float('inf')
         best_state = copy.deepcopy(self.model.state_dict())
         peak_reached = False
         peak_epoch = -1
 
+        global_step = 0
         for epoch in range(epochs):
             self.model.train()
             for X, y, _ in self.train_loader:
-                # preprocess
-                y_scaled = self.scaler.scale(y)
+                global_step += 1
+                y_s = self.scaler.scale(y)
                 src = X[:, :, 0]
-                frac = X[:, :, 1] * (1 + torch.randn_like(X[:, :, 1]) * self.fudge)
+                frac = X[:, :, 1]
+                frac = frac * (1 + torch.randn_like(frac) * self.fudge)
                 frac = torch.clamp(frac, 0, 1)
                 frac[src == 0] = 0
                 frac = frac / frac.sum(dim=1, keepdim=True)
 
                 src = src.to(self.compute_device, dtype=torch.long)
                 frac = frac.to(self.compute_device, dtype=data_type_torch)
-                y_scaled = y_scaled.to(self.compute_device, dtype=data_type_torch)
+                y_s = y_s.to(self.compute_device, dtype=data_type_torch)
 
-                out = self.model(src, frac)
-                pred, uncert = out.chunk(2, dim=-1)
-                loss = self.criterion(
-                    pred.view(-1), uncert.view(-1), y_scaled.view(-1)
-                )
+                pred, uncert = self.model(src, frac).chunk(2, dim=-1)
+                loss = criterion(pred.view(-1), uncert.view(-1), y_s.view(-1))
                 loss.backward()
-                self.optimizer.step()
-                self.optimizer.zero_grad()
+                self.optimizer.step(); self.optimizer.zero_grad()
 
-                # LR step + detect first peak
-                self.lr_scheduler.step()
-                # Detect first peak when internal step counter equals step_size_up
-                if not peak_reached and self.lr_scheduler._step_count >= steps:
+                scheduler.step()
+                # Detect first LR peak exactly when last_epoch == step_size_up
+                if not peak_reached and scheduler.last_epoch == scheduler.step_size_up:
                     peak_reached = True
                     peak_epoch = epoch
                     if self.verbose:
-                        print(f"LR peak reached at epoch {epoch}")
+                        print(f"LR peak reached at global step {global_step} (epoch {epoch})")
 
-            # validation & save only after peak
+            # --- validation ---
             if (epoch + 1) % checkin == 0 or epoch in (0, epochs - 1):
                 with torch.no_grad():
                     act, pred, *_ = self.predict(self.data_loader)
-                mae_v = mean_absolute_error(act, pred)
-                print(f"{phase_name} Epoch {epoch}/{epochs} — val MAE={mae_v:.4g}")
-                if peak_reached and epoch >= peak_epoch and mae_v < best_val_mae:
-                    best_val_mae = mae_v
+                mae = mean_absolute_error(act, pred)
+                print(f"{phase_name} epoch {epoch}/{epochs} — val MAE={mae:.4g}")
+
+                if peak_reached and mae < best_mae and epoch >= peak_epoch:
+                    best_mae = mae
                     best_state = copy.deepcopy(self.model.state_dict())
-                    print(f" New best post-peak at epoch {epoch}, MAE={mae_v:.4g}")
+                    print(f"  New best post‑peak checkpoint (epoch {epoch}, MAE={mae:.4g})")
 
-            # decay LR boundaries if requested
+            # --- optional LR decay between epochs ---
             if lr_decay < 1.0:
-                new_b = base_lr * (lr_decay ** (epoch + 1))
-                new_m = max_lr * (lr_decay ** (epoch + 1))
-                self.lr_scheduler = CyclicLR(
-                    self.optimizer,
-                    base_lr=new_b,
-                    max_lr=new_m,
-                    cycle_momentum=False,
-                    step_size_up=steps
-                )
+                base_lr *= lr_decay; max_lr *= lr_decay
+                scheduler = CyclicLR(self.optimizer, base_lr=base_lr, max_lr=max_lr,
+                                     step_size_up=steps_up, cycle_momentum=False)
 
-        # load & save best
         self.model.load_state_dict(best_state)
-        print(f"Loaded best {phase_name} post-peak (MAE={best_val_mae:.4g})")
-        self.save_network(model_name=f"{self.model_name}_{phase_name}_best")
+        print(f"Loaded best {phase_name} model (post‑peak MAE={best_mae:.4g})")
+        self.save_network(f"{self.model_name}_{phase_name}_best")
 
+    # ------------------------------------------------------------------
     def pretrain(self, epochs=10, checkin=2, optim_params=None):
-        if not optim_params:
-            optim_params = dict(base_lr=1e-4, max_lr=6e-3, lr_decay=1.0, epochs_step=1)
-        print("\n=== Pretraining ===")
+        optim_params = optim_params or dict(base_lr=1e-4, max_lr=6e-3, lr_decay=1.0, epochs_step=1)
         self._train_phase("Pretraining", epochs, checkin, optim_params)
 
     def finetune(self, epochs=20, checkin=2, optim_params=None):
-        if not optim_params:
-            optim_params = dict(base_lr=1e-4, max_lr=6e-3, lr_decay=0.98, epochs_step=1)
-        print("\n=== Fine-tuning ===")
-        self._train_phase("Fine-tuning", epochs, checkin, optim_params)
+        optim_params = optim_params or dict(base_lr=1e-4, max_lr=6e-3, lr_decay=0.98, epochs_step=1)
+        self._train_phase("Fine‑tuning", epochs, checkin, optim_params)
+
+    # # ------------------------------------------------------------------
+    # def predict(self, loader):
+    #     if isinstance(loader, str):
+    #         dh = DataHandler(loader, batch_size=2**9, n_elements=self.n_elements,
+    #                          inference=True, verbose=False, drop_unary=self.drop_unary, scale=self.scale)
+    #         loader = dh.get_data_loaders(inference=True)
+    #     self.model.eval()
+    #     act = []; pred = []
+    #     with torch.no_grad():
+    #         for X, y, _ in loader:
+    #             src = X[:, :, 0].to(self.compute_device, dtype=torch.long)
+    #             frac = X[:, :, 1].to(self.compute_device, dtype=data_type_torch)
+    #             y   = y.to(self.compute_device, dtype=data_type_torch)
+    #             p, _ = self.model(src, frac).chunk(2, dim=-1)
+    #             p = self.scaler.unscale(p)
+    #             act.append(y.view(-1).cpu()); pred.append(p.view(-1).cpu())
+    #     self.model.train()
+    #     return torch.cat(act).numpy(), torch.cat(pred).numpy(), None, None
+
+    # # ------------------------------------------------------------------
+    # def save_network(self, model_name):
+    #     os.makedirs('models/trained_models', exist_ok=True)
+    #     path = f'models/trained_models/{model_name}.pth'
+    #     torch.save({'weights': self.model.state_dict(),
+    #                 'scaler_state': self.scaler.state_dict(),
+    #                 'model_name': model_name}, path)
+    #     if self.verbose:
+    #         print(f"Saved checkpoint to {path}")
+
 
     def finetune_variants_for_soup(self, variant_configs, epochs=20, checkin=2):
         """
