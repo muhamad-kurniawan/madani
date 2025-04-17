@@ -38,6 +38,12 @@ class ModelTrainer:
         self.drop_unary = drop_unary
         self.scale = scale
 
+        # For attention capture and prediction
+        self.capture_flag = False
+        self.formula_current = None
+        self.act_v = None
+        self.pred_v = None
+
         if self.compute_device is None:
             self.compute_device = get_compute_device()
 
@@ -75,97 +81,87 @@ class ModelTrainer:
         print(f"\n--- Starting {phase_name} phase for {epochs} epochs ---")
         self.criterion = RobustL1 if not self.classification else BCEWithLogitsLoss
 
+        # Set up optimizer and scheduler
         base_optim = Lamb(params=self.model.parameters())
-        optimizer = base_optim
-        self.optimizer = optimizer
+        self.optimizer = base_optim
 
         base_lr = optim_params.get('base_lr', 1e-4)
         max_lr = optim_params.get('max_lr', 6e-3)
         lr_decay = optim_params.get('lr_decay', 1.0)
+        epochs_step = optim_params.get('epochs_step', 1)
 
-        self.epochs_step = optim_params.get('epochs_step', 1)
-        self.step_size = self.epochs_step * len(self.train_loader)
-        self.lr_scheduler = CyclicLR(self.optimizer,
-                                     base_lr=base_lr,
-                                     max_lr=max_lr,
-                                     cycle_momentum=False,
-                                     step_size_up=self.step_size)
-        self.stepping = True
+        step_size = epochs_step * len(self.train_loader)
+        self.lr_scheduler = CyclicLR(
+            self.optimizer,
+            base_lr=base_lr,
+            max_lr=max_lr,
+            cycle_momentum=False,
+            step_size_up=step_size
+        )
 
-        # Track best validation MAE
         best_val_mae = float('inf')
         best_state = copy.deepcopy(self.model.state_dict())
 
         for epoch in range(epochs):
             self.model.train()
-            ti = time()
-            for i, data in enumerate(self.train_loader):
-                X, y, formula = data
+            for X, y, formula in self.train_loader:
+                # Preprocess
                 y = self.scaler.scale(y)
-                src = X[:, :, 0]
-                frac = X[:, :, 1]
+                src = X[:,:,0]
+                frac = X[:,:,1]
+                frac = frac * (1 + torch.randn_like(frac)*self.fudge)
+                frac = torch.clamp(frac,0,1)
+                frac[src==0] = 0
+                frac = frac/frac.sum(dim=1,keepdim=True)
 
-                frac = frac * (1 + torch.randn_like(frac) * self.fudge)
-                frac = torch.clamp(frac, 0, 1)
-                frac[src == 0] = 0
-                frac = frac / frac.sum(dim=1, keepdim=True)
+                src = src.to(self.compute_device, dtype=torch.long)
+                frac = frac.to(self.compute_device, dtype=data_type_torch)
+                y   = y.to(self.compute_device, dtype=data_type_torch)
 
-                src = src.to(self.compute_device, dtype=torch.long, non_blocking=True)
-                frac = frac.to(self.compute_device, dtype=data_type_torch, non_blocking=True)
-                y = y.to(self.compute_device, dtype=data_type_torch, non_blocking=True)
-
-                output = self.model.forward(src, frac)
-                prediction, uncertainty = output.chunk(2, dim=-1)
+                # Forward + backward
+                output = self.model(src, frac)
+                pred, uncert = output.chunk(2,dim=-1)
                 loss = self.criterion(
-                    prediction.reshape(-1),
-                    uncertainty.reshape(-1),
-                    y.reshape(-1)
+                    pred.reshape(-1), uncert.reshape(-1), y.reshape(-1)
                 )
                 loss.backward()
                 self.optimizer.step()
                 self.optimizer.zero_grad()
+                self.lr_scheduler.step()
 
-                if self.stepping:
-                    self.lr_scheduler.step()
-
-            # Evaluate at check-in points
-            if (epoch+1) % checkin == 0 or epoch == epochs - 1 or epoch == 0:
+            # Check validation performance
+            if (epoch+1)%checkin==0 or epoch==epochs-1 or epoch==0:
                 with torch.no_grad():
                     act_v, pred_v, _, _ = self.predict(self.data_loader)
                 mae_v = mean_absolute_error(act_v, pred_v)
-                print(f"{phase_name} Epoch {epoch}/{epochs} --- val mae: {mae_v:0.4g}")
-
-                # If improved, save this model state
+                print(f"{phase_name} Epoch {epoch}/{epochs} — val MAE={mae_v:.4g}")
                 if mae_v < best_val_mae:
                     best_val_mae = mae_v
                     best_state = copy.deepcopy(self.model.state_dict())
-                    print(f"New best {phase_name} model at epoch {epoch} with val MAE={mae_v:0.4g}")
+                    print(f" New best model at epoch {epoch}, MAE={mae_v:.4g}")
+            # Update LR boundaries if decaying
+            if lr_decay<1.0:
+                new_base = base_lr*(lr_decay**(epoch+1))
+                new_max  = max_lr*(lr_decay**(epoch+1))
+                self.lr_scheduler = CyclicLR(
+                    self.optimizer, base_lr=new_base, max_lr=new_max,
+                    cycle_momentum=False, step_size_up=step_size
+                )
 
-            # Decay cyclic LR boundaries if requested
-            if lr_decay < 1.0:
-                new_base_lr = base_lr * (lr_decay ** (epoch+1))
-                new_max_lr = max_lr * (lr_decay ** (epoch+1))
-                self.lr_scheduler = CyclicLR(self.optimizer,
-                                             base_lr=new_base_lr,
-                                             max_lr=new_max_lr,
-                                             cycle_momentum=False,
-                                             step_size_up=self.step_size)
-
-        # After all epochs, load the best model
+        # Load & save best
         self.model.load_state_dict(best_state)
-        print(f"Loaded best {phase_name} model with val MAE={best_val_mae:0.4g}")
-        # Optionally save to disk
+        print(f"Loaded best {phase_name} model (val MAE={best_val_mae:.4g})")
         self.save_network(model_name=f"{self.model_name}_{phase_name}_best")
 
     def pretrain(self, epochs=10, checkin=2, optim_params=None):
         if optim_params is None:
-            optim_params = {'base_lr': 1e-4,'max_lr': 6e-3,'lr_decay': 1.0,'epochs_step': 1}
+            optim_params = dict(base_lr=1e-4, max_lr=6e-3, lr_decay=1.0, epochs_step=1)
         print("\n=== Pretraining Phase ===")
         self._train_phase("Pretraining", epochs, checkin, optim_params)
 
     def finetune(self, epochs=20, checkin=2, optim_params=None):
         if optim_params is None:
-            optim_params = {'base_lr': 1e-4,'max_lr': 6e-3,'lr_decay': 0.98,'epochs_step': 1}
+            optim_params = dict(base_lr=1e-4, max_lr=6e-3, lr_decay=0.98, epochs_step=1)
         print("\n=== Fine-tuning Phase ===")
         self._train_phase("Fine-tuning", epochs, checkin, optim_params)
 
