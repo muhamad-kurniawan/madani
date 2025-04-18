@@ -11,23 +11,15 @@ from madani.utils.input_processing import DataHandler, data_type_torch
 
 
 class ModelTrainer:
-    """A minimally refactored version that introduces a *single* set of default
-    optimisation hyper‑parameters that is shared by **all** training phases
-    (pre‑training, fine‑tuning, and soup variant fine‑tunes).  Any parameter
-    specified explicitly when calling a phase *overrides* the default for that
-    call; omitted keys fall back to the default.
-
-    Parameters
-    ----------
-    model : torch.nn.Module
-        The composition‑based prediction network.
-    default_optim_params : dict, optional
-        Global default for the CyclicLR envelope.  If omitted, the Paper's
-        values are used ``{"base_lr":1e-4,"max_lr":6e-3,"lr_decay":1.0,
-        "epochs_step":1}``.
-    ... (all other parameters unchanged)
+    """Refactored trainer with **one global optimiser config** that every phase
+    uses by default.  *variant* methods no longer *require* a list; if
+    `variant_configs` is omitted or empty they will simply fine‑tune **one**
+    variant that also uses the default parameters.
     """
 
+    # ───────────────────────────────────────────────────────
+    #  INIT
+    # ───────────────────────────────────────────────────────
     def __init__(self,
                  model,
                  model_name: str = "UnnamedModel",
@@ -38,197 +30,156 @@ class ModelTrainer:
                  scale: bool = True,
                  default_optim_params: dict | None = None):
 
-        # ══════════════════════════════
-        #  Store baseline attributes   
-        # ══════════════════════════════
+        # Store user arguments
         self.model = model
         self.model_name = model_name
-        self.data_loader = None
-        self.train_loader = None
-        self.classification = False
         self.n_elements = n_elements
         self.capture_every = capture_every
         self.verbose = verbose
         self.drop_unary = drop_unary
         self.scale = scale
+        self.classification = False
 
-        #  ‑‑ global default LR envelope (shared by every phase) ‑‑
-        if default_optim_params is None:
-            default_optim_params = dict(base_lr=1e-4, max_lr=6e-3,
-                                        lr_decay=1.0, epochs_step=1)
-        self.default_optim_params = default_optim_params
+        # Global default optimiser parameters (shared by *every* phase)
+        self.default_optim_params = default_optim_params or dict(
+            base_lr=1e-4, max_lr=6e-3, lr_decay=1.0, epochs_step=1
+        )
 
-        #  ‑‑ misc helpers ‑‑
-        self.fudge = 0.02  # random scaling factor for fraction "jitter"
-        self.compute_device = model.compute_device or get_compute_device()
-        self.capture_flag = False  # attention capture switch
-        self.formula_current = None
-        self.act_v = None
-        self.pred_v = None
+        # Misc helpers
+        self.fudge = 0.02  # fraction “jitter” noise strength
+        self.compute_device = getattr(model, "compute_device", None) or get_compute_device()
+        self.capture_flag = False
 
         if verbose:
             print("\nModel architecture: out_dims, d_model, N, heads")
-            print(f"{self.model.out_dims}, {self.model.d_model}, "
-                  f"{self.model.N}, {self.model.heads}")
+            print(f"{model.out_dims}, {model.d_model}, {model.N}, {model.heads}")
             print(f"Running on compute device: {self.compute_device}")
-            print(f"Model size: {count_parameters(self.model)} parameters\n")
-            if self.capture_every is not None:
-                print(f"Capturing attention tensors every {self.capture_every}")
+            print(f"Model size: {count_parameters(model)} parameters\n")
+            if capture_every is not None:
+                print(f"Capturing attention tensors every {capture_every}")
 
-    # ────────────────────────────────────────────────────────────────
-    #  UTILS
-    # ────────────────────────────────────────────────────────────────
-    def _merge_optim_params(self, custom: dict | None) -> dict:
-        """Return *default ⟵ custom* (custom overrides defaults)."""
-        if custom is None:
-            custom = {}
-        # Python 3.9+ dict union; fall back to {**} if needed
-        return self.default_optim_params | custom
+    # ───────────────────────────────────────────────────────
+    #  HELPER: merge defaults with overrides
+    # ───────────────────────────────────────────────────────
+    def _resolve_optim_params(self, override: dict | None) -> dict:
+        """Return the union of default optimiser params and a per‑call override."""
+        override = override or {}
+        return {**self.default_optim_params, **override}
 
     def set_default_optim_params(self, **kwargs):
-        """Update the global optimisation defaults *in‑place*."""
+        """Update optimiser defaults in‑place."""
         self.default_optim_params.update(kwargs)
         if self.verbose:
-            print("[ModelTrainer] Updated default optim params:",
-                  self.default_optim_params)
+            print("[ModelTrainer] New default optimiser params:", self.default_optim_params)
 
-    # ────────────────────────────────────────────────────────────────
-    #  DATA HANDLING (unchanged except for minor typing tweaks)
-    # ────────────────────────────────────────────────────────────────
-    def load_data(self, file_name: str, *, batch_size: int = 2 ** 9,
-                  train: bool = False):
+    # ───────────────────────────────────────────────────────
+    #  DATA LOADING (unchanged except typing tweaks)
+    # ───────────────────────────────────────────────────────
+    def load_data(self, file_name: str, *, batch_size: int = 2 ** 9, train: bool = False):
         self.batch_size = batch_size
-        inference = not train
-        loaders = DataHandler(file_name,
-                               batch_size=batch_size,
-                               n_elements=self.n_elements,
-                               inference=inference,
-                               verbose=self.verbose,
-                               drop_unary=self.drop_unary,
-                               scale=self.scale)
+        loader = DataHandler(
+            file_name,
+            batch_size=batch_size,
+            n_elements=self.n_elements,
+            inference=not train,
+            verbose=self.verbose,
+            drop_unary=self.drop_unary,
+            scale=self.scale,
+        )
         if self.verbose:
-            print(f"Loading data with up to {loaders.n_elements:0.0f} elements in the formula")
-        self.n_elements = loaders.n_elements
-        data_loader = loaders.get_data_loaders(inference=inference)
-        y = data_loader.dataset.y
+            print(f"Loading data with up to {loader.n_elements:0.0f} elements in the formula")
+        self.n_elements = loader.n_elements
+        self.data_loader = loader.get_data_loaders(inference=not train)
         if train:
-            self.train_len = len(y)
+            y = self.data_loader.dataset.y
+            self.train_loader = self.data_loader
             self.scaler = DummyScaler(y) if self.classification else Scaler(y)
-            self.train_loader = data_loader
-        self.data_loader = data_loader
 
-    # ────────────────────────────────────────────────────────────────
-    #  CORE TRAINING PHASE
-    # ────────────────────────────────────────────────────────────────
-    def _train_phase(self, phase_name: str, *,
-                     epochs: int,
-                     checkin: int,
-                     optim_params: dict | None):
-
-        optim_params = self._merge_optim_params(optim_params)
-        print(f"\n--- Starting {phase_name} phase for {epochs} epochs ---")
-        print("Using optim params:", optim_params)
+    # ───────────────────────────────────────────────────────
+    #  CORE TRAINING LOOP
+    # ───────────────────────────────────────────────────────
+    def _train_phase(self, phase_name: str, *, epochs: int, checkin: int, optim_params: dict | None):
+        optim_params = self._resolve_optim_params(optim_params)
+        print(f"\n--- {phase_name} for {epochs} epochs — optim params: {optim_params}")
 
         self.criterion = RobustL1 if not self.classification else BCEWithLogitsLoss
-        base_optim = Lamb(params=self.model.parameters())
-        self.optimizer = base_optim
+        self.optimizer = Lamb(params=self.model.parameters())
 
-        # CyclicLR boundaries & schedule
-        base_lr     = optim_params["base_lr"]
-        max_lr      = optim_params["max_lr"]
-        lr_decay    = optim_params["lr_decay"]
+        # Build scheduler
+        base_lr, max_lr = optim_params["base_lr"], optim_params["max_lr"]
+        lr_decay = optim_params["lr_decay"]
         epochs_step = optim_params["epochs_step"]
-
         step_size = epochs_step * len(self.train_loader)
-        self.lr_scheduler = torch.optim.lr_scheduler.CyclicLR(
-            self.optimizer, base_lr=base_lr, max_lr=max_lr,
-            step_size_up=step_size, cycle_momentum=False
+        make_sched = lambda lo, hi: torch.optim.lr_scheduler.CyclicLR(
+            self.optimizer, base_lr=lo, max_lr=hi, step_size_up=step_size, cycle_momentum=False
         )
+        self.lr_scheduler = make_sched(base_lr, max_lr)
 
-        best_val_mae = float("inf")
-        best_state = copy.deepcopy(self.model.state_dict())
+        best_score, best_state = float("inf"), copy.deepcopy(self.model.state_dict())
 
         for epoch in range(epochs):
             self.model.train()
             for X, y, _ in self.train_loader:
-                # --- preprocess (identical to original) ---
+                # jitter fractions
                 y = self.scaler.scale(y)
-                src = X[:, :, 0]
-                frac = X[:, :, 1]
-                frac = frac * (1 + torch.randn_like(frac) * self.fudge)
-                frac = torch.clamp(frac, 0, 1)
+                src, frac = X[:, :, 0], X[:, :, 1]
+                frac = torch.clamp(frac * (1 + torch.randn_like(frac) * self.fudge), 0, 1)
                 frac[src == 0] = 0
                 frac = frac / frac.sum(dim=1, keepdim=True)
-                src  = src.to(self.compute_device, dtype=torch.long)
+                src = src.to(self.compute_device, dtype=torch.long)
                 frac = frac.to(self.compute_device, dtype=data_type_torch)
-                y    = y.to(self.compute_device, dtype=data_type_torch)
-                # --- forward/backward ---
-                pred, log_uncert = self.model(src, frac).chunk(2, dim=-1)
-                loss = self.criterion(pred.reshape(-1), log_uncert.reshape(-1), y.reshape(-1))
+                y = y.to(self.compute_device, dtype=data_type_torch)
+
+                pred, log_u = self.model(src, frac).chunk(2, dim=-1)
+                loss = self.criterion(pred.view(-1), log_u.view(-1), y.view(-1))
                 loss.backward()
                 self.optimizer.step(); self.optimizer.zero_grad(); self.lr_scheduler.step()
 
-            # --- validation check‑in ---
             if (epoch + 1) % checkin == 0 or epoch in (0, epochs - 1):
-                with torch.no_grad():
-                    act_v, pred_v, _, _ = self.predict(self.data_loader)
-                mae_v = mean_absolute_error(act_v, pred_v)
-                print(f"{phase_name} Epoch {epoch}/{epochs} — val MAE={mae_v:.4g}")
-                if mae_v < best_val_mae:
-                    best_val_mae, best_state = mae_v, copy.deepcopy(self.model.state_dict())
-                    print(f"  New best model (MAE={mae_v:.4g}) at epoch {epoch}")
+                mae = mean_absolute_error(*self.predict(self.data_loader)[:2])
+                print(f"    Epoch {epoch:03d} — val MAE={mae:.4g}")
+                if mae < best_score:
+                    best_score, best_state = mae, copy.deepcopy(self.model.state_dict())
+                    print("      ↳ new best")
 
-            # --- decay LR envelope ---
             if lr_decay < 1.0:
                 base_lr *= lr_decay; max_lr *= lr_decay
-                self.lr_scheduler = torch.optim.lr_scheduler.CyclicLR(
-                    self.optimizer, base_lr=base_lr, max_lr=max_lr,
-                    step_size_up=step_size, cycle_momentum=False)
+                self.lr_scheduler = make_sched(base_lr, max_lr)
 
-        # restore best & save
         self.model.load_state_dict(best_state)
-        print(f"Loaded best {phase_name} model (val MAE={best_val_mae:.4g})")
-        self.save_network(model_name=f"{self.model_name}_{phase_name}_best")
+        print(f"Loaded best {phase_name} model (MAE={best_score:.4g})")
 
-    # ────────────────────────────────────────────────────────────────
-    #  PUBLIC PHASE WRAPPERS (all delegate to the same defaults)
-    # ────────────────────────────────────────────────────────────────
-    def pretrain(self, *, epochs: int = 10, checkin: int = 2,
-                 optim_params: dict | None = None):
-        print("\n=== Pre‑training Phase ===")
-        self._train_phase("Pretraining", epochs=epochs, checkin=checkin,
-                          optim_params=optim_params)
+    # ───────────────────────────────────────────────────────
+    #  PUBLIC WRAPPERS
+    # ───────────────────────────────────────────────────────
+    def pretrain(self, *, epochs: int = 10, checkin: int = 2, optim_params: dict | None = None):
+        self._train_phase("Pretrain", epochs=epochs, checkin=checkin, optim_params=optim_params)
 
-    def finetune(self, *, epochs: int = 20, checkin: int = 2,
-                 optim_params: dict | None = None):
-        print("\n=== Fine‑tuning Phase ===")
-        self._train_phase("Finetuning", epochs=epochs, checkin=checkin,
-                          optim_params=optim_params)
+    def finetune(self, *, epochs: int = 20, checkin: int = 2, optim_params: dict | None = None):
+        self._train_phase("Finetune", epochs=epochs, checkin=checkin, optim_params=optim_params)
 
-    # ────────────────────────────────────────────────────────────────
-    #  MODEL SOUP HELPERS — now merge default params automatically
-    # ────────────────────────────────────────────────────────────────
-    def _run_variant_and_collect(self, config_override, *, epochs, checkin):
-        # merge overrides with default once per variant
-        merged = self._merge_optim_params(config_override)
+    # ───────────────────────────────────────────────────────
+    #  SOUP HELPERS — variant_configs optional
+    # ───────────────────────────────────────────────────────
+    def _run_variant(self, override, *, epochs, checkin):
+        merged = self._resolve_optim_params(override)
         self.finetune(epochs=epochs, checkin=checkin, optim_params=merged)
-        act_v, pred_v, _, _ = self.predict(self.data_loader)
-        mae = mean_absolute_error(act_v, pred_v)
+        mae = mean_absolute_error(*self.predict(self.data_loader)[:2])
         return copy.deepcopy(self.model.state_dict()), mae
 
-    def finetune_variants_for_soup(self, variant_configs, *, epochs=20, checkin=2):
-        print("\n=== Finetuning Variants for *Plain* Model Soup ===")
-        pretrained_state = copy.deepcopy(self.model.state_dict())
+    def finetune_variants_for_soup(self, variant_configs: list | None = None, *, epochs: int = 20, checkin: int = 2):
+        """If *variant_configs* is None or empty, run **one** variant using defaults."""
+        variant_configs = variant_configs or [None]
+        pretrained = copy.deepcopy(self.model.state_dict())
         states = []
         for i, cfg in enumerate(variant_configs):
             print(f"\n--- Variant {i+1}/{len(variant_configs)} ---")
-            self.model.load_state_dict(pretrained_state)
-            st, _ = self._run_variant_and_collect(cfg, epochs=epochs, checkin=checkin)
+            self.model.load_state_dict(pretrained)
+            st, _ = self._run_variant(cfg, epochs=epochs, checkin=checkin)
             states.append(st)
-        # uniform average
-        avg_state = {k: sum(st[k] for st in states) / len(states) for k in states[0].keys()}
-        self.model.load_state_dict(avg_state)
-        print("\n[Plain Soup] Averaged", len(states), "variants → loaded into model.")
+        avg = {k: sum(st[k] for st in states) / len(states) for k in states[0]}
+        self.model.load_state_dict(avg)
+        print(f"\n[Plain Soup] Averaged {len(states)} variant(s) — loaded into model")
 
     def finetune_variants_for_greedy_soup(self, variant_configs, epochs=20, checkin=2):
         """
