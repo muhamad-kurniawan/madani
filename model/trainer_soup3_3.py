@@ -11,17 +11,16 @@ from madani.utils.input_processing import DataHandler, data_type_torch
 
 
 class ModelTrainer:
-    """Trainer with shared optimiser defaults and **reliable LR‑peak logging**.
+    """Trainer with shared optimiser defaults, LR‑peak logging, and attention‑capture flags compatible with the original `predict` routine."""
 
-    Prints a message the *moment* the scheduler transitions from rising to
-    falling within an epoch (detected by `lr_after < lr_before`).  This avoids
-    floating‑point equality issues.
-    """
-
+    # ———————————————————————————————————————————————————————————
+    # Init
+    # ———————————————————————————————————————————————————————————
     def __init__(self, model, model_name: str = "UnnamedModel", n_elements: int = 8,
                  capture_every=None, verbose: bool = True, drop_unary: bool = True,
                  scale: bool = True, default_optim_params: dict | None = None):
 
+        # Core attrs
         self.model = model
         self.model_name = model_name
         self.n_elements = n_elements
@@ -31,6 +30,7 @@ class ModelTrainer:
         self.scale = scale
         self.classification = False
 
+        # Shared default optimiser envelope
         self.default_optim_params = default_optim_params or {
             "base_lr": 1e-4,
             "max_lr": 6e-3,
@@ -38,8 +38,15 @@ class ModelTrainer:
             "epochs_step": 1,
         }
 
+        # Misc helpers
         self.fudge = 0.02  # jitter strength
         self.compute_device = getattr(model, "compute_device", None) or get_compute_device()
+
+        # ── attention‑capture state (needed by predict) ──
+        self.capture_flag = False
+        self.formula_current = None
+        self.act_v = None
+        self.pred_v = None
 
         if verbose:
             print("\nModel architecture: out_dims, d_model, N, heads")
@@ -60,7 +67,7 @@ class ModelTrainer:
         print("[Trainer] Default optimiser params now:", self.default_optim_params)
 
     # ———————————————————————————————————————————————————————————
-    # Data loading (unchanged logic)
+    # Data loading
     # ———————————————————————————————————————————————————————————
     def load_data(self, file_name: str, *, batch_size: int = 512, train: bool = False):
         self.batch_size = batch_size
@@ -77,12 +84,13 @@ class ModelTrainer:
             self.scaler = DummyScaler(y) if self.classification else Scaler(y)
 
     # ———————————————————————————————————————————————————————————
-    # Core training phase with peak‑LR announcement
+    # Core training phase (with LR‑peak logging)
     # ———————————————————————————————————————————————————————————
     def _train_phase(self, label: str, *, epochs: int, checkin: int, optim_params: dict | None):
         opt = self._merge_optim(optim_params)
         print(f"\n— {label} : {epochs} epochs — optimiser {opt}")
 
+        # Set criterion & optimiser
         self.criterion = RobustL1 if not self.classification else BCEWithLogitsLoss
         self.optimizer = Lamb(self.model.parameters())
 
@@ -92,7 +100,8 @@ class ModelTrainer:
 
         def cy_sched(lo, hi):
             return torch.optim.lr_scheduler.CyclicLR(
-                self.optimizer, base_lr=lo, max_lr=hi, step_size_up=step_up, cycle_momentum=False)
+                self.optimizer, base_lr=lo, max_lr=hi,
+                step_size_up=step_up, cycle_momentum=False)
 
         self.lr_scheduler = cy_sched(base_lr, max_lr)
         best_mae, best_state = float("inf"), copy.deepcopy(self.model.state_dict())
@@ -101,7 +110,7 @@ class ModelTrainer:
             self.model.train(); peak_announced = False
 
             for batch_idx, (X, y, _) in enumerate(self.train_loader):
-                # — preprocess
+                # Pre‑process batch
                 y = self.scaler.scale(y)
                 src, frac = X[:, :, 0], X[:, :, 1]
                 frac = torch.clamp(frac * (1 + torch.randn_like(frac) * self.fudge), 0, 1)
@@ -110,7 +119,7 @@ class ModelTrainer:
                 frac = frac.to(self.compute_device, dtype=data_type_torch)
                 y    = y.to(self.compute_device, dtype=data_type_torch)
 
-                # — forward/backward
+                # Forward / backward
                 pred, log_u = self.model(src, frac).chunk(2, dim=-1)
                 loss = self.criterion(pred.view(-1), log_u.view(-1), y.view(-1))
 
@@ -119,12 +128,12 @@ class ModelTrainer:
                 self.lr_scheduler.step()
                 lr_after = self.optimizer.param_groups[0]['lr']
 
-                # detect peak when trajectory turns downward
+                # Announce LR peak when descent starts
                 if not peak_announced and lr_after < lr_before:
                     print(f"        LR peak reached at epoch {epoch} (batch {batch_idx}) — lr={lr_before:.3e}")
                     peak_announced = True
 
-            # — validation
+            # Validation
             if (epoch + 1) % checkin == 0 or epoch in (0, epochs - 1):
                 mae = mean_absolute_error(*self.predict(self.data_loader)[:2])
                 print(f"    Epoch {epoch:03d} — val MAE={mae:.4g}")
@@ -132,7 +141,7 @@ class ModelTrainer:
                     best_mae, best_state = mae, copy.deepcopy(self.model.state_dict())
                     print("      ↳ new best")
 
-            # — shrink envelope
+            # Shrink LR envelope
             if lr_decay < 1.0:
                 base_lr *= lr_decay; max_lr *= lr_decay
                 self.lr_scheduler = cy_sched(base_lr, max_lr)
@@ -140,25 +149,24 @@ class ModelTrainer:
         self.model.load_state_dict(best_state)
         print(f"Loaded best {label} model (MAE={best_mae:.4g})")
 
-
-    # ───────────────────────────────────────────────────────
-    #  PUBLIC WRAPPERS
-    # ───────────────────────────────────────────────────────
+    # ———————————————————————————————————————————————————————————
+    # Public wrappers
+    # ———————————————————————————————————————————————————————————
     def pretrain(self, *, epochs: int = 10, checkin: int = 2, optim_params: dict | None = None):
         self._train_phase("Pretrain", epochs=epochs, checkin=checkin, optim_params=optim_params)
 
     def finetune(self, *, epochs: int = 20, checkin: int = 2, optim_params: dict | None = None):
         self._train_phase("Finetune", epochs=epochs, checkin=checkin, optim_params=optim_params)
 
-    # ───────────────────────────────────────────────────────
-    #  SOUP HELPERS — optional variant list
-    # ───────────────────────────────────────────────────────
+    # ———————————————————————————————————————————————————————————
+    # Soup helper (plain average)
+    # ———————————————————————————————————————————————————————————
     def _run_variant(self, override, *, epochs, checkin):
-        st_before = copy.deepcopy(self.model.state_dict())
+        start_state = copy.deepcopy(self.model.state_dict())
         self._train_phase("Variant", epochs=epochs, checkin=checkin, optim_params=override)
         mae = mean_absolute_error(*self.predict(self.data_loader)[:2])
         state = copy.deepcopy(self.model.state_dict())
-        self.model.load_state_dict(st_before)  # reset to original caller's state
+        self.model.load_state_dict(start_state)  # reset
         return state, mae
 
     def finetune_variants_for_soup(self, variant_configs: list | None = None, *, epochs: int = 20, checkin: int = 2):
