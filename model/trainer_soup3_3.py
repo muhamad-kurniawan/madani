@@ -1,4 +1,4 @@
-import os
+vimport os
 import copy
 import numpy as np
 import torch
@@ -11,24 +11,16 @@ from madani.utils.input_processing import DataHandler, data_type_torch
 
 
 class ModelTrainer:
-    """Trainer with a **single global optimiser envelope** shared across every
-    phase.  Now prints a message *the first time* the learning‑rate in an epoch
-    hits its maximum value ("LR peak reached …").  Soups accept an *optional*
-    list of overrides; an empty/None list means "run one variant with defaults".
+    """Trainer with shared optimiser defaults and **reliable LR‑peak logging**.
+
+    Prints a message the *moment* the scheduler transitions from rising to
+    falling within an epoch (detected by `lr_after < lr_before`).  This avoids
+    floating‑point equality issues.
     """
 
-    # ───────────────────────────────────────────────────────
-    #  INIT
-    # ───────────────────────────────────────────────────────
-    def __init__(self,
-                 model,
-                 model_name: str = "UnnamedModel",
-                 n_elements: int = 8,
-                 capture_every=None,
-                 verbose: bool = True,
-                 drop_unary: bool = True,
-                 scale: bool = True,
-                 default_optim_params: dict | None = None):
+    def __init__(self, model, model_name: str = "UnnamedModel", n_elements: int = 8,
+                 capture_every=None, verbose: bool = True, drop_unary: bool = True,
+                 scale: bool = True, default_optim_params: dict | None = None):
 
         self.model = model
         self.model_name = model_name
@@ -39,7 +31,6 @@ class ModelTrainer:
         self.scale = scale
         self.classification = False
 
-        # —— shared default optimiser params ——
         self.default_optim_params = default_optim_params or {
             "base_lr": 1e-4,
             "max_lr": 6e-3,
@@ -47,8 +38,7 @@ class ModelTrainer:
             "epochs_step": 1,
         }
 
-        # misc helpers
-        self.fudge = 0.02  # fraction‑noise strength
+        self.fudge = 0.02  # jitter strength
         self.compute_device = getattr(model, "compute_device", None) or get_compute_device()
 
         if verbose:
@@ -59,22 +49,20 @@ class ModelTrainer:
             if capture_every is not None:
                 print(f"Capturing attention tensors every {capture_every}")
 
-    # ───────────────────────────────────────────────────────
-    #  OPTIM PARAM HELPERS
-    # ───────────────────────────────────────────────────────
-    def _resolve_optim_params(self, override: dict | None) -> dict:
-        override = override or {}
-        return {**self.default_optim_params, **override}
+    # ———————————————————————————————————————————————————————————
+    # Utility helpers
+    # ———————————————————————————————————————————————————————————
+    def _merge_optim(self, override: dict | None) -> dict:
+        return {**self.default_optim_params, **(override or {})}
 
     def set_default_optim_params(self, **kwargs):
         self.default_optim_params.update(kwargs)
-        if self.verbose:
-            print("[ModelTrainer] Updated default optimiser params:", self.default_optim_params)
+        print("[Trainer] Default optimiser params now:", self.default_optim_params)
 
-    # ───────────────────────────────────────────────────────
-    #  DATA LOADING (unchanged)
-    # ───────────────────────────────────────────────────────
-    def load_data(self, file_name: str, *, batch_size: int = 2 ** 9, train: bool = False):
+    # ———————————————————————————————————————————————————————————
+    # Data loading (unchanged logic)
+    # ———————————————————————————————————————————————————————————
+    def load_data(self, file_name: str, *, batch_size: int = 512, train: bool = False):
         self.batch_size = batch_size
         handler = DataHandler(file_name, batch_size=batch_size, n_elements=self.n_elements,
                               inference=not train, verbose=self.verbose,
@@ -88,60 +76,55 @@ class ModelTrainer:
             self.train_loader = self.data_loader
             self.scaler = DummyScaler(y) if self.classification else Scaler(y)
 
-    # ───────────────────────────────────────────────────────
-    #  CORE TRAIN LOOP
-    # ───────────────────────────────────────────────────────
-    def _train_phase(self, phase_name: str, *, epochs: int, checkin: int, optim_params: dict | None):
-        optim_params = self._resolve_optim_params(optim_params)
-        print(f"\n--- {phase_name} for {epochs} epochs — optim params: {optim_params}")
+    # ———————————————————————————————————————————————————————————
+    # Core training phase with peak‑LR announcement
+    # ———————————————————————————————————————————————————————————
+    def _train_phase(self, label: str, *, epochs: int, checkin: int, optim_params: dict | None):
+        opt = self._merge_optim(optim_params)
+        print(f"\n— {label} : {epochs} epochs — optimiser {opt}")
 
-        # criterion & optimiser
         self.criterion = RobustL1 if not self.classification else BCEWithLogitsLoss
-        self.optimizer = Lamb(params=self.model.parameters())
+        self.optimizer = Lamb(self.model.parameters())
 
-        # scheduler factory
-        base_lr, max_lr = optim_params["base_lr"], optim_params["max_lr"]
-        lr_decay = optim_params["lr_decay"]
-        epochs_step = optim_params["epochs_step"]
-        step_size = epochs_step * len(self.train_loader)
+        base_lr, max_lr = opt["base_lr"], opt["max_lr"]
+        lr_decay, epochs_step = opt["lr_decay"], opt["epochs_step"]
+        step_up = epochs_step * len(self.train_loader)
 
-        def make_sched(lo, hi):
+        def cy_sched(lo, hi):
             return torch.optim.lr_scheduler.CyclicLR(
-                self.optimizer, base_lr=lo, max_lr=hi,
-                step_size_up=step_size, cycle_momentum=False)
+                self.optimizer, base_lr=lo, max_lr=hi, step_size_up=step_up, cycle_momentum=False)
 
-        self.lr_scheduler = make_sched(base_lr, max_lr)
+        self.lr_scheduler = cy_sched(base_lr, max_lr)
         best_mae, best_state = float("inf"), copy.deepcopy(self.model.state_dict())
 
-        # —— training epochs ——
         for epoch in range(epochs):
-            self.model.train()
-            peak_announced = False  # announce LR‑peak once per epoch
+            self.model.train(); peak_announced = False
 
             for batch_idx, (X, y, _) in enumerate(self.train_loader):
-                # — preprocess —
+                # — preprocess
                 y = self.scaler.scale(y)
                 src, frac = X[:, :, 0], X[:, :, 1]
                 frac = torch.clamp(frac * (1 + torch.randn_like(frac) * self.fudge), 0, 1)
-                frac[src == 0] = 0
-                frac = frac / frac.sum(dim=1, keepdim=True)
+                frac[src == 0] = 0; frac = frac / frac.sum(dim=1, keepdim=True)
                 src  = src.to(self.compute_device, dtype=torch.long)
                 frac = frac.to(self.compute_device, dtype=data_type_torch)
                 y    = y.to(self.compute_device, dtype=data_type_torch)
 
-                # — forward/backward —
+                # — forward/backward
                 pred, log_u = self.model(src, frac).chunk(2, dim=-1)
                 loss = self.criterion(pred.view(-1), log_u.view(-1), y.view(-1))
+
+                lr_before = self.optimizer.param_groups[0]['lr']
                 loss.backward(); self.optimizer.step(); self.optimizer.zero_grad()
                 self.lr_scheduler.step()
+                lr_after = self.optimizer.param_groups[0]['lr']
 
-                # — announce LR peak —
-                current_lr = self.optimizer.param_groups[0]['lr']
-                if (not peak_announced) and abs(current_lr - self.lr_scheduler.max_lrs[0]) < 1e-12:
-                    print(f"        LR peak reached at epoch {epoch} (batch {batch_idx}) — lr={current_lr:.3e}")
+                # detect peak when trajectory turns downward
+                if not peak_announced and lr_after < lr_before:
+                    print(f"        LR peak reached at epoch {epoch} (batch {batch_idx}) — lr={lr_before:.3e}")
                     peak_announced = True
 
-            # — validation —
+            # — validation
             if (epoch + 1) % checkin == 0 or epoch in (0, epochs - 1):
                 mae = mean_absolute_error(*self.predict(self.data_loader)[:2])
                 print(f"    Epoch {epoch:03d} — val MAE={mae:.4g}")
@@ -149,13 +132,14 @@ class ModelTrainer:
                     best_mae, best_state = mae, copy.deepcopy(self.model.state_dict())
                     print("      ↳ new best")
 
-            # — decay envelope for next epoch —
+            # — shrink envelope
             if lr_decay < 1.0:
                 base_lr *= lr_decay; max_lr *= lr_decay
-                self.lr_scheduler = make_sched(base_lr, max_lr)
+                self.lr_scheduler = cy_sched(base_lr, max_lr)
 
         self.model.load_state_dict(best_state)
-        print(f"Loaded best {phase_name} model (MAE={best_mae:.4g})")
+        print(f"Loaded best {label} model (MAE={best_mae:.4g})")
+
 
     # ───────────────────────────────────────────────────────
     #  PUBLIC WRAPPERS
