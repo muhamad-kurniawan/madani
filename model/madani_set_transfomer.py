@@ -116,7 +116,7 @@ class ResidualMLP(nn.Module):
 # -----------------------------------------------------------------------------
 # Full Model
 # -----------------------------------------------------------------------------
-class SetMadani(nn.Module):
+class Madani(nn.Module):
     """Composition‑only predictor using Set Transformer backbone."""
     def __init__(self, out_dims=3, d_model=256, num_heads=4, num_layers=3,
                  m_inducing=16, mat2vec_path="madani/data/element_properties/mat2vec.csv"):
