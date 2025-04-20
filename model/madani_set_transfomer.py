@@ -2,6 +2,8 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
+import pandas as pd
+from pathlib import Path
 
 # -----------------------------------------------------------------------------
 # Helper Blocks for Set Transformer
@@ -15,13 +17,12 @@ class MultiheadAttentionBlock(nn.Module):
         self.ln1 = nn.LayerNorm(dim_V)
         self.ff = nn.Sequential(
             nn.Linear(dim_V, 4 * dim_V),
-            nn.SiLU(),  # SiLU ~ Swish
+            nn.SiLU(),  # SiLU ~ Swish / part of SwiGLU
             nn.Linear(4 * dim_V, dim_V)
         )
         self.ln2 = nn.LayerNorm(dim_V)
 
     def forward(self, Q, K):
-        # Standard multi‑head attention followed by SwiGLU‑like FFN
         H, _ = self.mha(Q, K, K, need_weights=False)
         H = self.ln1(H + Q)
         out = self.ff(H)
@@ -53,19 +54,22 @@ class PoolingByMultiheadAttention(nn.Module):
         return self.mab(self.S.repeat(X.size(0), 1, 1), X)
 
 # -----------------------------------------------------------------------------
-# Embedding blocks (reuse from original implementation with minor tweaks)
+# Embedding blocks
 # -----------------------------------------------------------------------------
 class ElementEmbedder(nn.Module):
-    """ Embeds element Mat2Vec + fraction via small MLP. """
+    """Embeds element Mat2Vec + fractional amount via small MLP."""
     def __init__(self, d_model, mat2vec_path):
         super().__init__()
-        cbfv = np.loadtxt(mat2vec_path, delimiter=",", skiprows=1)  # expects no header after first col
-        zeros = np.zeros((1, cbfv.shape[1]))
+        mat2vec_path = Path(mat2vec_path)
+        if not mat2vec_path.exists():
+            raise FileNotFoundError(f"mat2vec file not found: {mat2vec_path}")
+        # First column is element symbol, remaining numeric features → use pandas
+        cbfv = pd.read_csv(mat2vec_path, index_col=0).values.astype(np.float32)
+        zeros = np.zeros((1, cbfv.shape[1]), dtype=np.float32)
         cat = np.concatenate([zeros, cbfv])
-        self.cbfv = nn.Embedding.from_pretrained(torch.tensor(cat, dtype=torch.float32), freeze=True)
+        self.cbfv = nn.Embedding.from_pretrained(torch.tensor(cat), freeze=True)
         self.proj = nn.Linear(cbfv.shape[1], d_model)
 
-        # small MLP for fractional amount
         self.frac_mlp = nn.Sequential(
             nn.Linear(1, d_model // 2),
             nn.SiLU(),
@@ -73,12 +77,12 @@ class ElementEmbedder(nn.Module):
         )
 
     def forward(self, elem_idx, frac):
-        e_emb = self.proj(self.cbfv(elem_idx))                # [B, T, d]
-        f_emb = self.frac_mlp(frac.unsqueeze(-1))             # [B, T, d]
+        e_emb = self.proj(self.cbfv(elem_idx))          # [B, T, d]
+        f_emb = self.frac_mlp(frac.unsqueeze(-1))       # [B, T, d]
         return e_emb + f_emb
 
 # -----------------------------------------------------------------------------
-# Main Set‑Transformer based encoder
+# Set Transformer Encoder
 # -----------------------------------------------------------------------------
 class SetEncoder(nn.Module):
     def __init__(self, d_model=256, num_heads=4, num_layers=3, m_inducing=16):
@@ -91,18 +95,18 @@ class SetEncoder(nn.Module):
     def forward(self, X):
         for layer in self.layers:
             X = layer(X)
-        Z = self.pma(X)         # [B, 1, d]
-        return Z.squeeze(1)     # [B, d]
+        Z = self.pma(X)  # [B, 1, d]
+        return Z.squeeze(1)
 
 # -----------------------------------------------------------------------------
-# Residual projector with SwiGLU (Shazeer 2020)
+# Residual projector with SwiGLU‑like MLP
 # -----------------------------------------------------------------------------
 class ResidualMLP(nn.Module):
     def __init__(self, d_in, d_out):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(d_in, 4 * d_in),
-            nn.SiLU(),  # approximates SwiGLU when paired with gate below
+            nn.SiLU(),
             nn.Linear(4 * d_in, d_out)
         )
 
@@ -112,8 +116,8 @@ class ResidualMLP(nn.Module):
 # -----------------------------------------------------------------------------
 # Full Model
 # -----------------------------------------------------------------------------
-class Madani(nn.Module):
-    """ Composition‑only predictor using Set Transformer backbone. """
+class SetMadani(nn.Module):
+    """Composition‑only predictor using Set Transformer backbone."""
     def __init__(self, out_dims=3, d_model=256, num_heads=4, num_layers=3,
                  m_inducing=16, mat2vec_path="madani/data/element_properties/mat2vec.csv"):
         super().__init__()
@@ -122,10 +126,10 @@ class Madani(nn.Module):
         self.proj = ResidualMLP(d_model, out_dims)
 
     def forward(self, elem_idx, frac):
-        X = self.embed(elem_idx, frac)        # [B, T, d]
+        X = self.embed(elem_idx, frac)                 # [B, T, d]
         mask = (frac == 0)
         X = X.masked_fill(mask.unsqueeze(-1), 0)
-        Z = self.encoder(X)                   # [B, d]
+        Z = self.encoder(X)                            # [B, d]
         out = self.proj(Z)
         return out
 
