@@ -124,7 +124,11 @@ class Madani(nn.Module):
         self.embed = ElementEmbedder(d_model, mat2vec_path)
         self.encoder = SetEncoder(d_model, num_heads, num_layers, m_inducing)
         self.proj = ResidualMLP(d_model, out_dims)
-
+        self.out_dims = out_dims
+        self.d_model = d_model
+        self.N = 'NA'
+        self.heads = self.num_heads
+    
     def forward(self, elem_idx, frac):
         X = self.embed(elem_idx, frac)                 # [B, T, d]
         mask = (frac == 0)
