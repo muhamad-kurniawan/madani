@@ -127,7 +127,7 @@ class Madani(nn.Module):
         self.out_dims = out_dims
         self.d_model = d_model
         self.N = 'NA'
-        self.heads = self.num_heads
+        self.heads = num_heads
     
     def forward(self, elem_idx, frac):
         X = self.embed(elem_idx, frac)                 # [B, T, d]
