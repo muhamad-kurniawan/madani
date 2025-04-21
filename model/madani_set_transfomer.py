@@ -9,15 +9,14 @@ from pathlib import Path
 # Helper Blocks for Set Transformer
 # -----------------------------------------------------------------------------
 class MultiheadAttentionBlock(nn.Module):
-    """ Multihead Attention Block (MAB) from Set Transformer. """
+    """Multi‑head Attention Block (MAB) from Set Transformer."""
     def __init__(self, dim_Q, dim_K, dim_V, num_heads):
         super().__init__()
-        self.dim_V = dim_V
         self.mha = nn.MultiheadAttention(embed_dim=dim_V, num_heads=num_heads, batch_first=True)
         self.ln1 = nn.LayerNorm(dim_V)
         self.ff = nn.Sequential(
             nn.Linear(dim_V, 4 * dim_V),
-            nn.SiLU(),  # SiLU ~ Swish / part of SwiGLU
+            nn.SiLU(),
             nn.Linear(4 * dim_V, dim_V)
         )
         self.ln2 = nn.LayerNorm(dim_V)
@@ -26,12 +25,11 @@ class MultiheadAttentionBlock(nn.Module):
         H, _ = self.mha(Q, K, K, need_weights=False)
         H = self.ln1(H + Q)
         out = self.ff(H)
-        out = self.ln2(out + H)
-        return out
+        return self.ln2(out + H)
 
 
 class InducedSetAttentionBlock(nn.Module):
-    """ Induced Set Attention Block (ISAB) with m inducing points. """
+    """Induced Set Attention Block (ISAB)."""
     def __init__(self, dim_in, num_heads, m_inducing):
         super().__init__()
         self.I = nn.Parameter(torch.randn(1, m_inducing, dim_in))
@@ -44,7 +42,7 @@ class InducedSetAttentionBlock(nn.Module):
 
 
 class PoolingByMultiheadAttention(nn.Module):
-    """ PMA block from Set Transformer for order‑invariant pooling. """
+    """Pooling by Multi‑head Attention (PMA) for set aggregation."""
     def __init__(self, dim, num_heads, num_seeds=1):
         super().__init__()
         self.S = nn.Parameter(torch.randn(1, num_seeds, dim))
@@ -54,21 +52,18 @@ class PoolingByMultiheadAttention(nn.Module):
         return self.mab(self.S.repeat(X.size(0), 1, 1), X)
 
 # -----------------------------------------------------------------------------
-# Embedding blocks
+# Embedding Block
 # -----------------------------------------------------------------------------
 class ElementEmbedder(nn.Module):
-    """Embeds element Mat2Vec + fractional amount via small MLP."""
+    """Embeds element Mat2Vec vectors + fractional amounts."""
     def __init__(self, d_model, mat2vec_path):
         super().__init__()
-        mat2vec_path = Path(mat2vec_path)
-        if not mat2vec_path.exists():
-            raise FileNotFoundError(f"mat2vec file not found: {mat2vec_path}")
-        # First column is element symbol, remaining numeric features → use pandas
-        cbfv = pd.read_csv(mat2vec_path, index_col=0).values.astype(np.float32)
-        zeros = np.zeros((1, cbfv.shape[1]), dtype=np.float32)
-        cat = np.concatenate([zeros, cbfv])
-        self.cbfv = nn.Embedding.from_pretrained(torch.tensor(cat), freeze=True)
-        self.proj = nn.Linear(cbfv.shape[1], d_model)
+        df = pd.read_csv(Path(mat2vec_path), index_col=0)
+        features = df.values.astype(np.float32)  # (118, feat_dim)
+        zeros = np.zeros((1, features.shape[1]), dtype=np.float32)
+        weight = torch.tensor(np.concatenate([zeros, features]))
+        self.cbfv = nn.Embedding.from_pretrained(weight, freeze=True)
+        self.proj = nn.Linear(features.shape[1], d_model)
 
         self.frac_mlp = nn.Sequential(
             nn.Linear(1, d_model // 2),
@@ -77,8 +72,8 @@ class ElementEmbedder(nn.Module):
         )
 
     def forward(self, elem_idx, frac):
-        e_emb = self.proj(self.cbfv(elem_idx))          # [B, T, d]
-        f_emb = self.frac_mlp(frac.unsqueeze(-1))       # [B, T, d]
+        e_emb = self.proj(self.cbfv(elem_idx))
+        f_emb = self.frac_mlp(frac.unsqueeze(-1))
         return e_emb + f_emb
 
 # -----------------------------------------------------------------------------
@@ -90,16 +85,15 @@ class SetEncoder(nn.Module):
         self.layers = nn.ModuleList([
             InducedSetAttentionBlock(d_model, num_heads, m_inducing) for _ in range(num_layers)
         ])
-        self.pma = PoolingByMultiheadAttention(d_model, num_heads, num_seeds=1)
+        self.pma = PoolingByMultiheadAttention(d_model, num_heads)
 
     def forward(self, X):
         for layer in self.layers:
             X = layer(X)
-        Z = self.pma(X)  # [B, 1, d]
-        return Z.squeeze(1)
+        return self.pma(X).squeeze(1)  # (B, d)
 
 # -----------------------------------------------------------------------------
-# Residual projector with SwiGLU‑like MLP
+# Output MLP with SwiGLU‑like non‑linearity
 # -----------------------------------------------------------------------------
 class ResidualMLP(nn.Module):
     def __init__(self, d_in, d_out):
@@ -117,33 +111,36 @@ class ResidualMLP(nn.Module):
 # Full Model
 # -----------------------------------------------------------------------------
 class Madani(nn.Module):
-    """Composition‑only predictor using Set Transformer backbone."""
+    """Composition‑only property predictor with Set Transformer backbone."""
     def __init__(self, out_dims=3, d_model=256, num_heads=4, num_layers=3,
-                 m_inducing=16, mat2vec_path="madani/data/element_properties/mat2vec.csv"):
+                 m_inducing=16, mat2vec_path="madani/data/element_properties/mat2vec.csv",
+                 compute_device=None):
         super().__init__()
+        self.out_dims = out_dims
+        self.d_model = d_model
+        self.N = num_layers
+        self.heads = num_heads
+        self.compute_device = compute_device or "cpu"
+
         self.embed = ElementEmbedder(d_model, mat2vec_path)
         self.encoder = SetEncoder(d_model, num_heads, num_layers, m_inducing)
         self.proj = ResidualMLP(d_model, out_dims)
-        self.out_dims = out_dims
-        self.d_model = d_model
-        self.N = 'NA'
-        self.heads = num_heads
-    
+
     def forward(self, elem_idx, frac):
-        X = self.embed(elem_idx, frac)                 # [B, T, d]
+        X = self.embed(elem_idx, frac)
         mask = (frac == 0)
         X = X.masked_fill(mask.unsqueeze(-1), 0)
-        Z = self.encoder(X)                            # [B, d]
-        out = self.proj(Z)
-        return out
+        z = self.encoder(X)
+        return self.proj(z)
 
 # -----------------------------------------------------------------------------
 # Example usage
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    B, T = 4, 8
-    dummy_elem = torch.randint(0, 119, (B, T))
-    dummy_frac = F.softmax(torch.randn(B, T), dim=-1)
+    B, T = 2, 6
+    elem = torch.randint(0, 119, (B, T))
+    frac = F.softmax(torch.randn(B, T), dim=-1)
     model = SetMadani()
-    y = model(dummy_elem, dummy_frac)
-    print(y.shape)  # Expected [B, out_dims]
+    print(model.out_dims, model.d_model, model.N, model.heads)
+    y = model(elem, frac)
+    print("Output shape:", y.shape)
