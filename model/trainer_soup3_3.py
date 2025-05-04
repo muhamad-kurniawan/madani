@@ -121,7 +121,7 @@ class ModelTrainer:
 
                 # Forward / backward
                 pred, log_u = self.model(src, frac).chunk(2, dim=-1)
-                loss = self.criterion(pred.view(-1), log_u.view(-1), y.view(-1))
+                loss = self.criterion(pred.reshape(-1), log_u.reshape(-1), y.reshape(-1))
 
                 lr_before = self.optimizer.param_groups[0]['lr']
                 loss.backward(); self.optimizer.step(); self.optimizer.zero_grad()
