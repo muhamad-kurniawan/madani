@@ -14,7 +14,7 @@ from torch import nn
 RNG_SEED = 42
 torch.manual_seed(RNG_SEED)
 np.random.seed(RNG_SEED)
-DTYPE = torch.float32
+data_type_torch = torch.float32
 
 def get_default_device():
     """Return CUDA if available, else CPU."""
