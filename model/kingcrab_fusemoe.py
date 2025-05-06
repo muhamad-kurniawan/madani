@@ -16,6 +16,9 @@ torch.manual_seed(RNG_SEED)
 np.random.seed(RNG_SEED)
 DTYPE = torch.float32
 
+def get_default_device():
+    """Return CUDA if available, else CPU."""
+    return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # ──────────────────────────────────────────────────────────────────────────────
 # MoE building blocks
 # ──────────────────────────────────────────────────────────────────────────────
@@ -85,43 +88,30 @@ class MoEElementFusion(nn.Module):
 # Descriptor embedder
 # ──────────────────────────────────────────────────────────────────────────────
 class MultiDescriptorEmbedder(nn.Module):
-    """Returns three projected descriptor embeddings per element: mat2vec,
-    MAGPIE and Oliynyk.  Outputs a *list* of tensors length 3.
-    """
-
-    def __init__(self, d_model: int, elem_dir: str,
-                 compute_device: torch.device | None = None):
+    """Return three projected descriptor views per element
+    (mat2vec, MAGPIE, Oliynyk)."""
+    def __init__(self, d_model: int, elem_dir: str, device):
         super().__init__()
-        self.d_model = d_model
-        self.device = compute_device
+        self.device = device
+        tables = {}
+        for name in ("mat2vec", "magpie", "oliynyk"):
+            path = f"{elem_dir}/{name}.csv"
+            tables[name] = pd.read_csv(path, index_col=0).values
 
-        def _load(fname: str):
-            arr = pd.read_csv(f"{elem_dir}/{fname}", index_col=0).values
-            return np.concatenate([np.zeros((1, arr.shape[1])), arr])  # pad row‑0
+        self.embs, self.projs = nn.ModuleDict(), nn.ModuleDict()
+        for k, arr in tables.items():
+            feat = arr.shape[-1]
+            pad = np.zeros((1, feat))              # idx 0 = padding
+            weight = torch.as_tensor(np.vstack([pad, arr]), dtype=data_type_torch)
+            self.embs[k] = nn.Embedding.from_pretrained(weight, freeze=False)
+            self.projs[k] = nn.Linear(feat, d_model)
 
-        tbl_mat2vec = _load('mat2vec.csv')      # 200‑d
-        tbl_magpie  = _load('magpie.csv')       # 145‑d
-        tbl_oliy    = _load('oliynyk.csv')      # 112‑d
-
-        self.emb_mat2vec = nn.Embedding.from_pretrained(
-            torch.tensor(tbl_mat2vec, dtype=DTYPE), freeze=True)
-        self.emb_magpie  = nn.Embedding.from_pretrained(
-            torch.tensor(tbl_magpie, dtype=DTYPE),  freeze=True)
-        self.emb_oliy    = nn.Embedding.from_pretrained(
-            torch.tensor(tbl_oliy, dtype=DTYPE),    freeze=True)
-
-        self.proj_mat2vec = nn.Linear(tbl_mat2vec.shape[1], d_model)
-        self.proj_magpie  = nn.Linear(tbl_magpie.shape[1],  d_model)
-        self.proj_oliy    = nn.Linear(tbl_oliy.shape[1],    d_model)
-
-    # ------------------------------------------------------------------
-    def forward(self, Z: torch.Tensor):
-        # Z: (batch, n_elem) atomic‑number indices (0=pad)
-        v1 = self.proj_mat2vec(self.emb_mat2vec(Z))
-        v2 = self.proj_magpie(self.emb_magpie(Z))
-        v3 = self.proj_oliy(self.emb_oliy(Z))
-        return [v1, v2, v3]  # list length 3, each (batch, n_elem, d_model)
-
+    def forward(self, z):
+        views = []
+        for k in ("mat2vec", "magpie", "oliynyk"):
+            emb = self.embs[k](z).to(self.device)
+            views.append(self.projs[k](emb))
+        return views  # list len = 3, each (B, L, d_model)
 # ──────────────────────────────────────────────────────────────────────────────
 # Fractional encoders (unchanged)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -151,42 +141,28 @@ class FractionalEncoder(nn.Module):
 # Encoder
 # ──────────────────────────────────────────────────────────────────────────────
 class Encoder(nn.Module):
-    def __init__(self, d_model: int, N: int, heads: int, use_moe: bool = True,
-                 compute_device: torch.device | None = None):
+    def __init__(self, d_model: int, N: int, heads: int, use_moe: bool, n_experts: int, top_k: int, device):
         super().__init__()
-        self.d_model, self.use_moe = d_model, use_moe
-        elem_dir = 'madani/data/element_properties'
-        self.embedder = MultiDescriptorEmbedder(d_model, elem_dir, compute_device)
+        self.device = device
+        self.embedder = MultiDescriptorEmbedder(d_model, "madani/data/element_properties", device)
+        self.use_moe = use_moe
         if use_moe:
-            self.moe = MoEElementFusion(d_model, n_experts=16, top_k=4, n_views=3)
-        self.pe_lin = FractionalEncoder(d_model, log10=False)
-        self.pe_log = FractionalEncoder(d_model, log10=True)
+            self.fuser = MoEElementFusion(d_model=d_model, n_experts=n_experts, k=top_k)
+        self.pe  = FractionalEncoder(d_model, resolution=5000, log10=False)
+        self.ple = FractionalEncoder(d_model, resolution=5000, log10=True)
+        enc_layer = nn.TransformerEncoderLayer(d_model, heads, dim_feedforward=2048, dropout=0.1, batch_first=True)
+        self.transformer = nn.TransformerEncoder(enc_layer, N)
 
-        enc_layer = nn.TransformerEncoderLayer(d_model, heads, 4 * d_model, 0.1)
-        self.transformer = nn.TransformerEncoder(enc_layer, num_layers=N)
-
-        self.emb_scale = nn.Parameter(torch.tensor(0.0))
-        self.pe_scale  = nn.Parameter(torch.tensor(0.0))
-        self.ple_scale = nn.Parameter(torch.tensor(0.0))
-
-    # ------------------------------------------------------------------
-    def forward(self, Z: torch.Tensor, frac: torch.Tensor):
-        """Z (batch, n_elem), frac (batch, n_elem)."""
+    def forward(self, Z, frac):  # Z: (B, L) element indices
         views = self.embedder(Z)
         if self.use_moe:
-            x = self.moe([v * 2 ** self.emb_scale for v in views])
+            x = self.fuser(views)                    # (B, L, d_model)
         else:
-            x = sum(views) / len(views)
-
-        # Fractional positional encodings
-        pe  = torch.zeros_like(x)
-        ple = torch.zeros_like(x)
-        pe[:, :, :self.d_model // 2] = self.pe_lin(frac) * 2 ** self.pe_scale
-        ple[:, :, self.d_model // 2:] = self.pe_log(frac) * 2 ** self.ple_scale
-
-        x = x + pe + ple
-        x = self.transformer(x.transpose(0, 1)).transpose(0, 1)
-        return x * frac.unsqueeze(-1)  # optional fractional weighting
+            x = sum(views)                           # simple additive fusion
+        # positional encodings
+        x += self.pe(frac) + self.ple(frac)
+        x = self.transformer(x)
+        return x * frac.unsqueeze(-1)                # optional fractional scaling
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Residual head (unchanged)
@@ -212,27 +188,32 @@ class ResidualNetwork(nn.Module):
 # CrabNet‑FuseMoE model
 # ──────────────────────────────────────────────────────────────────────────────
 class CrabNet(nn.Module):
-    def __init__(self, out_dims: int = 3, d_model: int = 512, N: int = 3,
-                 heads: int = 4, use_moe: bool = True):
+    def __init__(self, out_dims=3, d_model=512, N=3, heads=4, use_moe=True, n_experts=16, top_k=4, residual_nn='roost', device=None):
         super().__init__()
-        self.encoder = Encoder(d_model, N, heads, use_moe)
-        self.output_nn = ResidualNetwork(d_model, out_dims * 2, [1024, 512, 256, 128])
+        self.device = get_default_device() if device is None else device
+        self.encoder = Encoder(d_model, N, heads, use_moe, n_experts, top_k, self.device).to(self.device)
         self.out_dims = out_dims
+        hidden = [1024, 512, 256, 128] if residual_nn == 'roost' else [256, 128]
+        self.output_nn = ResidualNetwork(d_model, out_dims, hidden).to(self.device)
+
+    @property
+    def compute_device(self):
+        return self.device
 
     def forward(self, Z, frac):
-        h = self.encoder(Z, frac)            # (batch, n_elem, d_model)
-        mask = (Z == 0).unsqueeze(-1).repeat(1, 1, self.out_dims * 2)
-        out = self.output_nn(h).masked_fill(mask, 0)
-        out = out.sum(1) / (~mask).sum(1)    # element‑wise average
-        y, logit = out.chunk(2, dim=-1)
-        p = torch.sigmoid(logit)
-        return y * p
+        Z, frac = Z.to(self.device), frac.to(self.device)
+        h = self.encoder(Z, frac)                    # (B, L, d_model)
+        out = self.output_nn(h)
+        mask = (Z == 0).unsqueeze(-1).expand_as(out)
+        out = out.masked_fill(mask, 0)
+        out = out.sum(1) / (~mask).sum(1)            # average element contributions
+        return out
 
-# ──────────────────────────────────────────────────────────────────────────────
+# =============================================================
 if __name__ == "__main__":
-    # Dummy forward pass
-    Z    = torch.tensor([[1, 8, 0, 0], [11, 17, 8, 0]])  # H2O, NaClO
-    frac = torch.tensor([[0.666, 0.333, 0, 0], [0.5, 0.25, 0.25, 0]])
-    model = CrabNet(out_dims=1, use_moe=True)
-    y_hat = model(Z, frac)
-    print("Output shape:", y_hat.shape)
+    B, L = 4, 8               # batch size, max elements per formula
+    Z = torch.randint(1, 20, (B, L))
+    frac = torch.rand(B, L)
+    model = CrabNet().train()
+    pred = model(Z, frac)
+    print(pred.shape)
