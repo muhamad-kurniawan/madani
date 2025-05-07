@@ -135,7 +135,7 @@ class MoEElementFusion(nn.Module):
 # ------------------------------
 # Encoder with MoE or additive fusion
 # ------------------------------
-class Encoder(nn.Module):(nn.Module):
+class Encoder(nn.Module):
     def __init__(self,d_model,N,heads,use_moe,n_experts,top_k,device):
         super().__init__()
         self.embedder = MultiDescriptorEmbedder(d_model,'madani/data/element_properties',device)
