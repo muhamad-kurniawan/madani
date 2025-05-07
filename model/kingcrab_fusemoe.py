@@ -147,7 +147,7 @@ class Encoder(nn.Module):
         self.embedder = MultiDescriptorEmbedder(d_model, "madani/data/element_properties", device)
         self.use_moe = use_moe
         if use_moe:
-            self.fuser = MoEElementFusion(d_model=d_model, n_experts=n_experts, k=top_k)
+            self.fuser = MoEElementFusion(d_model=d_model, n_experts=n_experts, top_k=top_k)
         self.pe  = FractionalEncoder(d_model, resolution=5000, log10=False)
         self.ple = FractionalEncoder(d_model, resolution=5000, log10=True)
         enc_layer = nn.TransformerEncoderLayer(d_model, heads, dim_feedforward=2048, dropout=0.1, batch_first=True)
