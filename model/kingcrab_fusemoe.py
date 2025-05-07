@@ -152,6 +152,9 @@ class CrabNet(nn.Module):
         self.output_nn = ResidualNetwork(d_model,out_dims*2,hidden).to(self.device)
         self.avg = True
         self.out_dims = out_dims
+        self.d_model = d_model
+        self.N = N
+        self.heads = heads
         # Alias for legacy trainer
         self.compute_device = self.device
     # expose property access
