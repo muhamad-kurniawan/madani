@@ -23,95 +23,89 @@ def get_default_device():
 # MoE building blocks
 # ──────────────────────────────────────────────────────────────────────────────
 class MoEElementFusion(nn.Module):
-    """Laplace‑gated sparse Mixture‑of‑Experts for element‑level fusion.
-
-    Args
-    ----
-    d_model : int
-        Hidden size expected by the Transformer.
-    n_experts : int
-        Number of feed‑forward experts shared by all views.
-    top_k : int
-        How many experts a router sends each token to.
-    n_views : int
-        Number of alternative descriptor embeddings per element.
-    """
-
-    def __init__(self, d_model: int, n_experts: int = 16,
-                 top_k: int = 4, n_views: int = 3):
+    def __init__(self, d_model: int, n_experts: int = 16, top_k: int = 4):
         super().__init__()
-        self.d_model, self.n_experts, self.top_k, self.n_views = (
-            d_model, n_experts, top_k, n_views)
+        self.d_model = d_model
+        self.n_experts = n_experts
+        self.top_k = top_k
 
-        # Shared expert pool (position‑wise FFNs)
-        self.experts = nn.ModuleList([nn.Sequential(
-            nn.Linear(d_model, 4 * d_model),
-            nn.GELU(),
-            nn.Linear(4 * d_model, d_model))
-            for _ in range(n_experts)])
+        self.experts = nn.ModuleList([nn.Sequential(nn.Linear(d_model, 4*d_model),
+                                                    nn.GELU(),
+                                                    nn.Linear(4*d_model, d_model))
+                                       for _ in range(n_experts)])
+        # View‑specific routers will be supplied from outside
+        self.routers = nn.ModuleList()
+        # Expert keys used by Laplace gate ‑‑ give them a batch‑broadcast axis
+        key = torch.empty(1, n_experts, d_model)
+        nn.init.uniform_(key, -0.02, 0.02)
+        self.register_buffer("expert_keys", key)
 
-        # One simple linear router per view  →  n_experts logits
-        self.routers = nn.ModuleList([nn.Linear(d_model, n_experts, bias=False)
-                                      for _ in range(n_views)])
-
-        # Expert keys for Laplace gating (initialised orthogonal)
-        self.register_parameter('expert_keys', nn.Parameter(
-            torch.empty(n_experts, d_model)))
-        nn.init.orthogonal_(self.expert_keys)
-
-    # ---------------------------------------------------------------------
-    def _laplace_gate(self, h: torch.Tensor, router: nn.Module) -> torch.Tensor:
-        """Compute Laplace gate:  −‖h−Wj‖² for each expert j, top‑k softmax."""
-        # (batch, d) −> (batch, n_experts)
-        logits = -torch.cdist(h, self.expert_keys, p=2) ** 2
-        logits = logits + router(h)  # router adds view‑specific bias
-        topk_val, topk_idx = logits.topk(self.top_k, dim=-1)
-        gate = (topk_val - topk_val.logsumexp(-1, keepdim=True)).exp()
-        return gate, topk_idx
+    def add_router(self):
+        """Append a new router (1×lin) for an additional view."""
+        self.routers.append(nn.Linear(self.d_model, self.n_experts))
+        return len(self.routers) - 1   # index
 
     # ---------------------------------------------------------------------
-    def forward(self, views: list[torch.Tensor]):
-        if len(views) != self.n_views:
-            raise ValueError(f"Expected {self.n_views} views, got {len(views)}")
-        fused = 0
-        for v, router in zip(views, self.routers):  # iterate over views
-            gate, idx = self._laplace_gate(v, router)  # (B, k)
-            # Aggregate expert outputs
-            out = torch.zeros_like(v)
-            for j in range(self.top_k):
-                exp_j = self.experts[idx[:, j]]  # ModuleList is indexable with tensor
-                out = out + gate[:, j:j+1] * exp_j(v)
-            fused = fused + out
-        return fused  # (batch, d_model)
+    # Laplace gate (patched): works on 3‑D tokens (B, L, d)
+    # ---------------------------------------------------------------------
+    def _laplace_gate(self, h, router):
+        """Compute soft Laplace gating weights & top‑k indices."""
+        B, L, D = h.shape
+        # (B, L, n) where n = n_experts
+        dist = torch.cdist(h, self.expert_keys.expand(B, -1, -1), p=2)
+        logits = -(dist ** 2) + router(h)              # add view bias
+        top_val, top_idx = logits.topk(self.top_k, dim=-1)
+        weights = torch.softmax(top_val, dim=-1)       # (B, L, k)
+        return weights, top_idx
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Descriptor embedder
-# ──────────────────────────────────────────────────────────────────────────────
+    def forward(self, views):
+        # views: list of (B, L, d_model)
+        if not self.routers:            # lazily create routers to match views
+            for _ in views:
+                self.add_router()
+
+        fused = 0.0
+        for v, router in zip(views, self.routers):
+            w, idx = self._laplace_gate(v, router)
+            # Gather expert outputs — loop since k is small (≤4)
+            out = 0.0
+            for k_slot in range(self.top_k):
+                sel = idx[..., k_slot]                 # (B, L)
+                # (B, L, d) gather
+                exp_out = torch.stack([self.experts[j](v[i]) for i, j in
+                                       torch.cartesian_prod(torch.arange(v.shape[0]),
+                                                            torch.arange(v.shape[1]))])
+                exp_out = exp_out.view(v.shape)
+                out += w[..., k_slot:k_slot+1] * exp_out
+            fused += out
+        return fused
+
+# ---------------------------------------------------------------------------
+# Multi‑descriptor embedder (MAGPIE, mat2vec, Oliynyk)
+# ---------------------------------------------------------------------------
 class MultiDescriptorEmbedder(nn.Module):
-    """Return three projected descriptor views per element
-    (mat2vec, MAGPIE, Oliynyk)."""
-    def __init__(self, d_model: int, elem_dir: str, device):
+    def __init__(self, d_model: int, elem_dir: str, device: torch.device):
         super().__init__()
-        self.device = device
-        tables = {}
-        for name in ("mat2vec", "magpie", "oliynyk"):
-            path = f"{elem_dir}/{name}.csv"
-            tables[name] = pd.read_csv(path, index_col=0).values
-
+        tables = {
+            "mat2vec":  "mat2vec.csv",
+            "magpie":   "magpie.csv",
+            "oliynyk":  "oliynyk.csv",
+        }
         self.embs, self.projs = nn.ModuleDict(), nn.ModuleDict()
-        for k, arr in tables.items():
+        for k, fn in tables.items():
+            arr = pd.read_csv(f"{elem_dir}/{fn}", index_col=0).values
             feat = arr.shape[-1]
-            pad = np.zeros((1, feat))              # idx 0 = padding
+            pad = np.zeros((1, feat))
             weight = torch.as_tensor(np.vstack([pad, arr]), dtype=data_type_torch)
-            self.embs[k] = nn.Embedding.from_pretrained(weight, freeze=False)
-            self.projs[k] = nn.Linear(feat, d_model)
+            self.embs[k] = nn.Embedding.from_pretrained(weight, freeze=False).to(device)
+            self.projs[k] = nn.Linear(feat, d_model).to(device)
 
-    def forward(self, z):
+    def forward(self, Z):
         views = []
-        for k in ("mat2vec", "magpie", "oliynyk"):
-            emb = self.embs[k](z).to(self.device)
-            views.append(self.projs[k](emb))
-        return views  # list len = 3, each (B, L, d_model)
+        for k in self.embs.keys():
+            emb = self.embs[k](Z)
+            views.append(self.projs[k](emb))     # (B, L, d)
+        return views
 # ──────────────────────────────────────────────────────────────────────────────
 # Fractional encoders (unchanged)
 # ──────────────────────────────────────────────────────────────────────────────
