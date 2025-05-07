@@ -193,6 +193,9 @@ class CrabNet(nn.Module):
         self.device = get_default_device() if device is None else device
         self.encoder = Encoder(d_model, N, heads, use_moe, n_experts, top_k, self.device).to(self.device)
         self.out_dims = out_dims
+        self.d_model = d_model
+        self.N = N
+        self.heads = heads
         hidden = [1024, 512, 256, 128] if residual_nn == 'roost' else [256, 128]
         self.output_nn = ResidualNetwork(d_model, out_dims, hidden).to(self.device)
 
