@@ -42,7 +42,9 @@ class MultiDescriptorEmbedder(nn.Module):
     def __init__(self, d_model, elem_dir, device):
         super().__init__()
         self.device = device
-        files = {"mat2vec":"mat2vec.csv","magpie":"magpie.csv","oliy":"oliynyk.csv"}
+        # files = {"mat2vec":"mat2vec.csv","magpie":"magpie.csv","oliy":"oliynyk.csv"}
+        files = {"mat2vec":"mat2vec.csv","magpie":"mat2vec.csv","oliy":"mat2vec.csv"}
+
         self.embs, self.projs = nn.ModuleDict(), nn.ModuleDict()
         for k,f in files.items():
             arr = pd.read_csv(f"{elem_dir}/{f}",index_col=0).values
