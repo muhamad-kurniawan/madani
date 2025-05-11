@@ -43,7 +43,7 @@ class MultiDescriptorEmbedder(nn.Module):
         super().__init__()
         self.device = device
         # files = {"mat2vec":"mat2vec.csv","magpie":"magpie.csv","oliy":"oliynyk.csv"}
-        files = {"mat2vec":"mat2vec.csv","magpie":"mat2vec.csv","oliy":"mat2vec.csv"}
+        files = {"mat2vec":"mat2vec.csv","magpie":"magpie.csv"}
 
         self.embs, self.projs = nn.ModuleDict(), nn.ModuleDict()
         for k,f in files.items():
